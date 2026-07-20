@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/balujaidevsreekumar/Documents/bkb-cpl-1-2026/frontend && exec python3 -m http.server 8811 --bind 127.0.0.1"],
+      "port": 8811
+    }
+  ]
+}
