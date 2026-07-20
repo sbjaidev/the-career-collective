@@ -34,6 +34,7 @@ function doPost(e) {
       case 'submitActivity': return handleSubmitActivity(params);
       case 'react': return handleReact(params);
       case 'comment': return handleComment(params);
+      case 'deleteComment': return handleDeleteComment(params);
       default: return errorOutput('Unknown action: ' + params.action);
     }
   } catch (err) {

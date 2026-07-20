@@ -113,12 +113,20 @@ function switchPanel(name) {
 
 function startWallPolling() {
   stopWallPolling();
-  wallPollTimer = setInterval(loadWall, WALL_POLL_INTERVAL_MS);
+  wallPollTimer = setInterval(pollWallTick, WALL_POLL_INTERVAL_MS);
 }
 
 function stopWallPolling() {
   if (wallPollTimer) clearInterval(wallPollTimer);
   wallPollTimer = null;
+}
+
+// Re-rendering mid-keystroke would yank the comment box out from under
+// whoever's typing, so a poll tick that lands while someone has a comment
+// field focused just skips itself — the next tick tries again.
+function pollWallTick() {
+  if (document.activeElement?.matches('.comment-form input')) return;
+  loadWall();
 }
 
 async function loadWall() {
@@ -134,18 +142,24 @@ function renderWall(entries) {
     return;
   }
 
+  const myUserId = Session.get()?.user?.user_id;
+
   panel.innerHTML = entries.map((entry) => {
     const reactionChips = Object.entries(entry.reactions || {})
       .map(([emoji, count]) => `<span class="reaction-chip">${escapeHtml(emoji)} ${count}</span>`)
       .join('');
 
     const quickButtons = QUICK_REACTIONS
-      .map((emoji) => `<button class="quick-react" data-log="${entry.log_id}" data-emoji="${emoji}">${emoji}</button>`)
+      .map((emoji) => `<button type="button" class="quick-react" data-log="${entry.log_id}" data-emoji="${emoji}">${emoji}</button>`)
       .join('');
 
     const comments = (entry.comments || [])
-      .map((c) => `<div class="comment"><strong>${escapeHtml(c.name)}</strong> ${escapeHtml(c.text)}</div>`)
-      .join('');
+      .map((c) => `
+        <div class="comment">
+          <span><strong>${escapeHtml(c.name)}</strong> ${escapeHtml(c.text)}</span>
+          ${c.user_id === myUserId ? `<button type="button" class="comment-delete" data-comment="${c.comment_id}" title="Delete comment">×</button>` : ''}
+        </div>
+      `).join('');
 
     return `
       <article class="wall-card">
@@ -163,33 +177,77 @@ function renderWall(entries) {
         <div class="wall-comments">${comments}</div>
         <form class="comment-form" data-log="${entry.log_id}">
           <input type="text" placeholder="Add a comment…" maxlength="500" />
+          <button type="submit">Post</button>
         </form>
       </article>
     `;
   }).join('');
 
   panel.querySelectorAll('.quick-react').forEach((btn) => {
-    btn.addEventListener('click', () => reactToEntry(btn.dataset.log, btn.dataset.emoji));
+    btn.addEventListener('click', () => reactToEntry(btn.dataset.log, btn.dataset.emoji, btn));
+  });
+  panel.querySelectorAll('.comment-delete').forEach((btn) => {
+    btn.addEventListener('click', () => deleteComment(btn.dataset.comment, btn));
   });
   panel.querySelectorAll('.comment-form').forEach((form) => {
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const input = form.querySelector('input');
-      if (!input.value.trim()) return;
-      addComment(form.dataset.log, input.value.trim());
-      input.value = '';
+      const button = form.querySelector('button');
+      const text = input.value.trim();
+      if (!text) return;
+      input.disabled = true;
+      button.disabled = true;
+      button.textContent = 'Posting…';
+      addComment(form.dataset.log, text, form);
     });
   });
 }
 
-async function reactToEntry(logId, emoji) {
-  await Api.authedPost('react', { log_id: logId, emoji });
+// Buttons disable immediately on click so the click always feels
+// instant — Apps Script's round trip alone can take a second or two.
+async function reactToEntry(logId, emoji, btn) {
+  btn.disabled = true;
+  const result = await Api.authedPost('react', { log_id: logId, emoji });
+  if (!result.ok) {
+    btn.disabled = false;
+    return;
+  }
   loadWall();
 }
 
-async function addComment(logId, text) {
-  await Api.authedPost('comment', { log_id: logId, text });
+async function addComment(logId, text, form) {
+  const result = await Api.authedPost('comment', { log_id: logId, text });
+  if (!result.ok) {
+    const input = form.querySelector('input');
+    const button = form.querySelector('button');
+    input.disabled = false;
+    button.disabled = false;
+    button.textContent = 'Post';
+    showFormError(form, result.error || 'Could not post comment.');
+    return;
+  }
   loadWall();
+}
+
+async function deleteComment(commentId, btn) {
+  btn.disabled = true;
+  const result = await Api.authedPost('deleteComment', { comment_id: commentId });
+  if (!result.ok) {
+    btn.disabled = false;
+    return;
+  }
+  loadWall();
+}
+
+function showFormError(form, message) {
+  let err = form.nextElementSibling;
+  if (!err || !err.classList.contains('comment-error')) {
+    err = document.createElement('p');
+    err.className = 'result error comment-error';
+    form.after(err);
+  }
+  err.textContent = message;
 }
 
 // ---- Leaderboard ----

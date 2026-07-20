@@ -175,9 +175,23 @@ main { max-width: 640px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
   border-radius: 6px;
 }
 .quick-react:hover { background: var(--paper); }
+.quick-react:disabled { opacity: 0.35; }
 .wall-comments { display: flex; flex-direction: column; gap: 0.3rem; }
-.comment { font-size: 0.85rem; }
-.comment-form input { font-size: 0.85rem; padding: 0.45rem 0.65rem; }
+.comment { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; font-size: 0.85rem; }
+.comment-delete {
+  background: none;
+  color: var(--muted);
+  font-weight: 400;
+  padding: 0 0.3rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.comment-delete:hover { color: var(--red); }
+.comment-form { display: flex; gap: 0.5rem; }
+.comment-form input { flex: 1; font-size: 0.85rem; padding: 0.45rem 0.65rem; }
+.comment-form input:disabled { opacity: 0.6; }
+.comment-form button { font-size: 0.85rem; padding: 0.45rem 0.85rem; }
+.comment-error { margin-top: -0.2rem; }
 
 /* ---- Leaderboard ---- */
 .scope-toggle { display: flex; gap: 0.4rem; margin-bottom: 1rem; }

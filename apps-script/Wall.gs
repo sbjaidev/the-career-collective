@@ -39,7 +39,7 @@ function handleWall(params) {
       .sort(function (a, b) { return new Date(a.timestamp) - new Date(b.timestamp); })
       .map(function (c) {
         var author = usersById[c.user_id];
-        return { user_id: c.user_id, name: author ? author.name : c.user_id, text: c.text, timestamp: c.timestamp };
+        return { comment_id: c.comment_id, user_id: c.user_id, name: author ? author.name : c.user_id, text: c.text, timestamp: c.timestamp };
       });
 
     return {
@@ -101,5 +101,19 @@ function handleComment(params) {
     text: text,
     timestamp: new Date()
   });
+  return successOutput({});
+}
+
+function handleDeleteComment(params) {
+  var userId = requireAuth(params);
+  var commentId = params.comment_id;
+
+  var sheet = getSheet(SHEETS.WALL_COMMENTS.name);
+  var comments = sheetToObjects(SHEETS.WALL_COMMENTS.name);
+  var index = comments.findIndex(function (c) { return c.comment_id === commentId; });
+  if (index < 0) return errorOutput('Comment not found.');
+  if (comments[index].user_id !== userId) return errorOutput('You can only delete your own comments.');
+
+  sheet.deleteRow(index + 2); // +2: row 1 is headers, index is 0-based
   return successOutput({});
 }
