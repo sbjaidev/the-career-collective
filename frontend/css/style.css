@@ -28,6 +28,10 @@
 }
 
 * { box-sizing: border-box; }
+/* An element's own display rule (e.g. #login-view's flex) otherwise beats
+   the browser's default [hidden] { display: none } — author styles always
+   outrank user-agent styles regardless of specificity. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
