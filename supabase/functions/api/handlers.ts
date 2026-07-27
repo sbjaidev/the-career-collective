@@ -267,6 +267,90 @@ export async function handleUpdateProfile(db: SupabaseClient, params: Params) {
   return { ok: true };
 }
 
+// ---- Goals ----
+
+// Visible to anyone viewing the profile, not just the goal-setter — same
+// visibility as the rest of the profile fields. target_count of 1 is
+// meant to render as a checkbox client-side; anything higher as a
+// progress bar. current_count counts every log entry for that activity
+// regardless of capped/points, since a goal like "10 mock interviews" is
+// about how many you actually did, not how many earned points.
+export async function handleGetGoals(db: SupabaseClient, params: Params) {
+  const userId = params.user_id;
+  if (!userId) return { ok: false, error: "user_id is required." };
+
+  const { data: goalRows } = await db.from("user_goals").select("*").eq("user_id", userId);
+  if (!goalRows || goalRows.length === 0) return { ok: true, goals: [] };
+
+  const activityIds = goalRows.map((g: Row) => g.activity_id);
+  const { data: configRows } = await db
+    .from("activities_config")
+    .select("activity_id, activity_name")
+    .in("activity_id", activityIds);
+  const configById: Record<string, Row> = {};
+  (configRows || []).forEach((c: Row) => { configById[c.activity_id] = c; });
+
+  const { data: logRows } = await db
+    .from("activity_log")
+    .select("activity_id")
+    .eq("user_id", userId)
+    .in("activity_id", activityIds);
+  const countByActivity: Record<string, number> = {};
+  (logRows || []).forEach((l: Row) => { countByActivity[l.activity_id] = (countByActivity[l.activity_id] || 0) + 1; });
+
+  const goals = goalRows.map((g: Row) => ({
+    activity_id: g.activity_id,
+    activity_name: configById[g.activity_id]?.activity_name || g.activity_id,
+    target_count: g.target_count,
+    current_count: countByActivity[g.activity_id] || 0,
+  }));
+
+  return { ok: true, goals };
+}
+
+// Candidate activities for the "add a goal" form — scoped to the caller's
+// own job_function. An activity with no job_functions set applies to
+// everyone. This only affects what shows up as a suggestion; it doesn't
+// restrict which activities someone can actually log.
+export async function handleGoalCandidates(db: SupabaseClient, params: Params) {
+  const userId = await requireAuth(params);
+  const { data: user } = await db.from("users").select("job_function").eq("user_id", userId).maybeSingle();
+  const jobFunction = user?.job_function || "";
+
+  const { data: configRows } = await db.from("activities_config").select("*").eq("active", true);
+  const candidates = (configRows || [])
+    .filter((c: Row) => {
+      const scopes = String(c.job_functions || "").split(",").map((s: string) => s.trim()).filter(Boolean);
+      return scopes.length === 0 || scopes.includes(jobFunction);
+    })
+    .map((c: Row) => ({ activity_id: c.activity_id, activity_name: c.activity_name, category: c.category }));
+
+  return { ok: true, activities: candidates };
+}
+
+// Full replace, not incremental — matches a single "Save goals" form
+// submission listing every candidate activity's target at once. A target
+// of 0 (or an activity left out entirely) means "not tracking this."
+export async function handleUpdateGoals(db: SupabaseClient, params: Params) {
+  const userId = await requireAuth(params);
+  const goals = Array.isArray(params.goals) ? params.goals : [];
+
+  const cleaned = goals
+    .map((g: Row) => ({ activity_id: String(g?.activity_id || ""), target_count: Number(g?.target_count) || 0 }))
+    .filter((g: Row) => g.activity_id && g.target_count > 0);
+
+  const { error: deleteError } = await db.from("user_goals").delete().eq("user_id", userId);
+  if (deleteError) return { ok: false, error: "Something went wrong: " + deleteError.message };
+
+  if (cleaned.length > 0) {
+    const rows = cleaned.map((g: Row) => ({ user_id: userId, activity_id: g.activity_id, target_count: g.target_count }));
+    const { error: insertError } = await db.from("user_goals").insert(rows);
+    if (insertError) return { ok: false, error: "Something went wrong: " + insertError.message };
+  }
+
+  return { ok: true };
+}
+
 // Computed live rather than from a stored snapshot table — at this scale
 // (dozens of people, two months) re-aggregating on request is cheap and
 // keeps trends from ever going stale.

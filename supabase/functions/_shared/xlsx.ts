@@ -15,6 +15,7 @@ export const TABLES_IN_IMPORT_ORDER = [
   "teams",
   "users",
   "activities_config",
+  "user_goals",
   "activity_log",
   "wall_reactions",
   "wall_comments",
@@ -25,6 +26,7 @@ const PRIMARY_KEYS: Record<string, string> = {
   teams: "team_id",
   users: "user_id",
   activities_config: "activity_id",
+  user_goals: "user_id,activity_id",
   activity_log: "log_id",
   wall_reactions: "reaction_id",
   wall_comments: "comment_id",
@@ -44,8 +46,9 @@ const ALL_COLUMNS: Record<string, string[]> = {
   ],
   activities_config: [
     "activity_id", "activity_name", "category", "base_points",
-    "weekly_cap_units", "cap_window", "evidence_hint", "surface_on_wall", "active",
+    "weekly_cap_units", "cap_window", "evidence_hint", "surface_on_wall", "active", "job_functions",
   ],
+  user_goals: ["user_id", "activity_id", "target_count"],
   activity_log: [
     "log_id", "created_at", "user_id", "activity_id", "activity_date",
     "points_awarded", "note_or_link", "week_number", "capped",

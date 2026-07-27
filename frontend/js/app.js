@@ -16,6 +16,21 @@ function formatTimestamp(iso) {
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+// job_function is stored as a stable code (used for team assignment and
+// goal-candidate filtering) — this is purely a display mapping. Falls
+// back to the raw code for anything not in the list, so a new job type
+// doesn't need a frontend deploy to at least show up as something.
+const JOB_FUNCTION_LABELS = {
+  software_engineer: 'Software Engineer',
+  product_manager: 'Product Manager',
+  qa: 'Quality Analyst / Engineer',
+  program_manager: 'Program Manager',
+};
+function formatJobFunction(code) {
+  if (!code) return '';
+  return JOB_FUNCTION_LABELS[code] || code;
+}
+
 // Shared by the Wall and by Profile — deletable by the entry's own author,
 // or by an admin (of anyone's entry); the server enforces this too, this
 // is just what decides whether the control renders at all.
@@ -100,7 +115,7 @@ function showApp() {
   document.getElementById('login-view').hidden = true;
   document.getElementById('app-view').hidden = false;
   document.getElementById('me-name').textContent = user.name;
-  document.getElementById('me-team').textContent = user.team_name || user.job_function;
+  document.getElementById('me-team').textContent = user.team_name || formatJobFunction(user.job_function);
   switchPanel('wall');
 }
 
@@ -333,7 +348,7 @@ async function loadLeaderboard(scope) {
             <td>${scope === 'team'
               ? escapeHtml(r.team_name)
               : `<button type="button" class="lb-name-link" data-user="${r.user_id}">${escapeHtml(r.name)}</button>`}</td>
-            <td class="muted">${escapeHtml(scope === 'team' ? r.job_function : r.team_name)}</td>
+            <td class="muted">${escapeHtml(scope === 'team' ? formatJobFunction(r.job_function) : r.team_name)}</td>
             <td class="num">${r.points}</td>
           </tr>
         `).join('')}
@@ -433,12 +448,19 @@ async function loadProfile() {
   const isOwnProfile = targetUserId === me.user_id;
   const canDeleteTheirEntries = isOwnProfile || me.role === 'admin';
 
-  const result = await Api.get('profile', { user_id: targetUserId });
+  const [result, goalsResult, candidatesResult] = await Promise.all([
+    Api.get('profile', { user_id: targetUserId }),
+    Api.get('getGoals', { user_id: targetUserId }),
+    isOwnProfile ? Api.authedPost('getGoalCandidates', {}) : Promise.resolve(null),
+  ]);
+
   if (!result.ok) {
     panel.innerHTML = '<p class="empty">Could not load profile.</p>';
     return;
   }
   const u = result.user;
+  const goals = goalsResult.ok ? goalsResult.goals : [];
+  const candidates = candidatesResult?.ok ? candidatesResult.activities : [];
 
   const details = [
     u.interested_role ? ['Interested in', escapeHtml(u.interested_role)] : null,
@@ -450,8 +472,10 @@ async function loadProfile() {
   const showAdmin = isOwnProfile && me.role === 'admin';
   const toc = [
     details.length ? ['profile-section-details', 'Details'] : null,
+    ['profile-section-goals', 'Goals'],
     ['profile-section-activities', 'Activities'],
     isOwnProfile ? ['profile-section-edit', 'Edit Details'] : null,
+    isOwnProfile ? ['profile-section-goals-edit', 'Edit Goals'] : null,
     showAdmin ? ['profile-section-admin', 'Admin'] : null,
   ].filter(Boolean);
 
@@ -460,7 +484,7 @@ async function loadProfile() {
       <div class="profile-points">${result.total_points}</div>
       <div class="profile-meta">
         <div>${escapeHtml(u.name)}</div>
-        <div class="muted">${escapeHtml(u.team_name || u.job_function || '')} · Rank #${result.rank}</div>
+        <div class="muted">${escapeHtml(u.team_name || formatJobFunction(u.job_function) || '')} · Rank #${result.rank}</div>
       </div>
     </div>
 
@@ -473,6 +497,11 @@ async function loadProfile() {
         ${details.map(([label, value]) => `<div><span class="muted">${label}</span><span>${value}</span></div>`).join('')}
       </section>
     ` : ''}
+
+    <section id="profile-section-goals">
+      <h3>${isOwnProfile ? 'Your goals' : 'Goals'}</h3>
+      <div class="goals-list">${renderGoalsList(goals, isOwnProfile)}</div>
+    </section>
 
     <section id="profile-section-activities">
       <h3>${isOwnProfile ? 'Your recent activity' : 'Recent activity'}</h3>
@@ -489,6 +518,7 @@ async function loadProfile() {
     </section>
 
     ${isOwnProfile ? renderProfileEditForm(u) : ''}
+    ${isOwnProfile ? renderGoalsEditForm(candidates, goals) : ''}
     ${showAdmin ? renderAdminBackupSection() : ''}
 
     <a href="#profile-top" class="back-to-top">↑ Back to top</a>
@@ -500,8 +530,97 @@ async function loadProfile() {
 
   if (isOwnProfile) {
     wireProfileEditForm();
+    wireGoalsEditForm();
     if (showAdmin) wireAdminBackupSection();
   }
+}
+
+function renderGoalsList(goals, isOwnProfile) {
+  if (goals.length === 0) {
+    return `<p class="empty">${isOwnProfile ? "You haven't set any goals yet — add some below." : 'No goals set yet.'}</p>`;
+  }
+  return goals.map((g) => {
+    if (g.target_count <= 1) {
+      const done = g.current_count >= g.target_count;
+      return `
+        <div class="goal-row goal-row-check">
+          <span class="goal-checkbox ${done ? 'done' : ''}" aria-hidden="true">${done ? '✓' : ''}</span>
+          <span>${escapeHtml(g.activity_name)}</span>
+        </div>
+      `;
+    }
+    const pct = Math.min(100, Math.round((g.current_count / g.target_count) * 100));
+    return `
+      <div class="goal-row goal-row-progress">
+        <span>${escapeHtml(g.activity_name)}</span>
+        <div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%"></div></div>
+        <span class="num muted">${g.current_count}/${g.target_count}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderGoalsEditForm(candidates, goals) {
+  const targetByActivity = {};
+  goals.forEach((g) => { targetByActivity[g.activity_id] = g.target_count; });
+
+  const byCategory = {};
+  candidates.forEach((a) => {
+    byCategory[a.category] = byCategory[a.category] || [];
+    byCategory[a.category].push(a);
+  });
+
+  return `
+    <section id="profile-section-goals-edit">
+      <h3>Update your goals</h3>
+      <form id="goals-edit-form" class="goals-edit-form">
+        ${Object.entries(byCategory).map(([category, items]) => `
+          <fieldset>
+            <legend>${escapeHtml(category)}</legend>
+            ${items.map((a) => `
+              <label class="goal-edit-row">
+                <span>${escapeHtml(a.activity_name)}</span>
+                <input type="number" min="0" max="999" data-activity="${a.activity_id}" value="${targetByActivity[a.activity_id] || ''}" placeholder="0" />
+              </label>
+            `).join('')}
+          </fieldset>
+        `).join('') || '<p class="empty">No activities available to set goals for.</p>'}
+        <button type="submit">Save Goals</button>
+        <p id="goals-edit-result" class="result" hidden></p>
+      </form>
+    </section>
+  `;
+}
+
+function wireGoalsEditForm() {
+  document.getElementById('goals-edit-form')?.addEventListener('submit', handleGoalsEditSubmit);
+}
+
+async function handleGoalsEditSubmit(e) {
+  e.preventDefault();
+  const button = e.target.querySelector('button');
+  const resultEl = document.getElementById('goals-edit-result');
+  button.disabled = true;
+  button.textContent = 'Saving…';
+
+  const goals = [...e.target.querySelectorAll('input[data-activity]')]
+    .map((input) => ({ activity_id: input.dataset.activity, target_count: Number(input.value) || 0 }))
+    .filter((g) => g.target_count > 0);
+
+  const result = await Api.authedPost('updateGoals', { goals });
+
+  button.disabled = false;
+  button.textContent = 'Save Goals';
+  resultEl.hidden = false;
+
+  if (!result.ok) {
+    resultEl.textContent = result.error;
+    resultEl.className = 'result error';
+    return;
+  }
+  resultEl.textContent = 'Saved.';
+  resultEl.className = 'result success';
+  setTimeout(loadProfile, 700);
 }
 
 function renderProfileEditForm(u) {

@@ -48,7 +48,12 @@ create table activities_config (
   cap_window        text,           -- 'week' | 'month' | null
   evidence_hint     text,
   surface_on_wall   boolean not null default true,
-  active            boolean not null default true
+  active            boolean not null default true,
+  -- Comma-separated job_function codes this activity applies to (e.g.
+  -- 'software_engineer,qa'). Blank/null = applies to everyone. Only
+  -- affects which activities show up as goal-setting candidates — it
+  -- doesn't restrict who can log the activity itself.
+  job_functions     text
 );
 
 create table activity_log (
@@ -87,6 +92,17 @@ create table season_config (
   value  text
 );
 
+-- One row per (user, activity) they're tracking as a goal. target_count
+-- of 1 displays as a checkbox in the UI; anything higher displays as a
+-- progress bar. Progress itself isn't stored here — it's counted live
+-- from activity_log, same as everything else in this schema.
+create table user_goals (
+  user_id       text not null references users(user_id) on delete cascade,
+  activity_id   text not null references activities_config(activity_id) on delete cascade,
+  target_count  integer not null default 1,
+  primary key (user_id, activity_id)
+);
+
 alter table teams             enable row level security;
 alter table users             enable row level security;
 alter table activities_config enable row level security;
@@ -94,5 +110,6 @@ alter table activity_log      enable row level security;
 alter table wall_reactions    enable row level security;
 alter table wall_comments     enable row level security;
 alter table season_config     enable row level security;
+alter table user_goals        enable row level security;
 -- No policies are created — default-deny for anon/authenticated. The Edge
 -- Function connects with the service_role key, which bypasses RLS entirely.
