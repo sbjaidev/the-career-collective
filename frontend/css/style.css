@@ -33,6 +33,9 @@
    outrank user-agent styles regardless of specificity. */
 [hidden] { display: none !important; }
 html, body { height: 100%; }
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
 body {
   margin: 0;
   background: var(--paper);
@@ -221,7 +224,26 @@ main { max-width: 640px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
 .num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
 
 /* ---- Profile ---- */
-.profile-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+.profile-head { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; scroll-margin-top: 1rem; }
+.profile-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.85rem;
+}
+.profile-toc a { color: var(--gold); text-decoration: none; }
+.profile-toc a:hover { text-decoration: underline; }
+#panel-profile section { margin-bottom: 2rem; scroll-margin-top: 1rem; }
+.back-to-top {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+.back-to-top:hover { color: var(--gold); }
 .profile-points {
   font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   font-size: 2.5rem;
@@ -231,13 +253,23 @@ main { max-width: 640px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
 .activity-log { display: flex; flex-direction: column; }
 .log-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 0.75rem;
   align-items: center;
   padding: 0.6rem 0;
   border-bottom: 1px solid var(--line);
   font-size: 0.9rem;
 }
+.log-delete, .wall-delete {
+  background: none;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.78rem;
+  padding: 0.1rem 0.4rem;
+}
+.log-delete:hover, .wall-delete:hover { color: var(--red); }
+
+.wall-card-foot { display: flex; align-items: center; justify-content: space-between; font-size: 0.78rem; }
 
 .profile-details {
   display: flex;

@@ -11,6 +11,32 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function formatTimestamp(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+// Shared by the Wall and by Profile — deletable by the entry's own author,
+// or by an admin (of anyone's entry); the server enforces this too, this
+// is just what decides whether the control renders at all.
+function canDeleteEntry(entryUserId) {
+  const me = Session.get()?.user;
+  return me && (entryUserId === me.user_id || me.role === 'admin');
+}
+
+async function deleteActivityEntry(logId, btn, onSuccess) {
+  const confirmed = confirm('Delete this entry? This also removes its points and cannot be undone.');
+  if (!confirmed) return;
+  btn.disabled = true;
+  const result = await Api.authedPost('deleteActivity', { log_id: logId });
+  if (!result.ok) {
+    btn.disabled = false;
+    alert(result.error || 'Could not delete entry.');
+    return;
+  }
+  onSuccess();
+}
+
 function getActivePanel() {
   return document.querySelector('.tab-btn.active')?.dataset.panel;
 }
@@ -188,6 +214,10 @@ function renderWall(entries) {
         </div>
         <div class="wall-activity">${escapeHtml(entry.activity_name)}</div>
         ${entry.note_or_link ? `<div class="wall-note">${escapeHtml(entry.note_or_link)}</div>` : ''}
+        <div class="wall-card-foot">
+          <span class="wall-timestamp muted">${formatTimestamp(entry.timestamp)}</span>
+          ${canDeleteEntry(entry.user_id) ? `<button type="button" class="wall-delete" data-log="${entry.log_id}">Delete</button>` : ''}
+        </div>
         <div class="wall-reactions">
           ${reactionChips}
           <span class="quick-react-row">${quickButtons}</span>
@@ -209,6 +239,9 @@ function renderWall(entries) {
   });
   panel.querySelectorAll('.comment-delete').forEach((btn) => {
     btn.addEventListener('click', () => deleteComment(btn.dataset.comment, btn));
+  });
+  panel.querySelectorAll('.wall-delete').forEach((btn) => {
+    btn.addEventListener('click', () => deleteActivityEntry(btn.dataset.log, btn, loadWall));
   });
   panel.querySelectorAll('.comment-form').forEach((form) => {
     form.addEventListener('submit', (e) => {
@@ -398,6 +431,7 @@ async function loadProfile() {
   const me = Session.get().user;
   const targetUserId = viewingUserId || me.user_id;
   const isOwnProfile = targetUserId === me.user_id;
+  const canDeleteTheirEntries = isOwnProfile || me.role === 'admin';
 
   const result = await Api.get('profile', { user_id: targetUserId });
   if (!result.ok) {
@@ -413,64 +447,87 @@ async function loadProfile() {
     u.linkedin_url ? ['LinkedIn', `<a href="${escapeHtml(u.linkedin_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.linkedin_url)}</a>`] : null,
   ].filter(Boolean);
 
+  const showAdmin = isOwnProfile && me.role === 'admin';
+  const toc = [
+    details.length ? ['profile-section-details', 'Details'] : null,
+    ['profile-section-activities', 'Activities'],
+    isOwnProfile ? ['profile-section-edit', 'Edit Details'] : null,
+    showAdmin ? ['profile-section-admin', 'Admin'] : null,
+  ].filter(Boolean);
+
   panel.innerHTML = `
-    <div class="profile-head">
+    <div class="profile-head" id="profile-top">
       <div class="profile-points">${result.total_points}</div>
       <div class="profile-meta">
         <div>${escapeHtml(u.name)}</div>
         <div class="muted">${escapeHtml(u.team_name || u.job_function || '')} · Rank #${result.rank}</div>
       </div>
     </div>
+
+    <nav class="profile-toc">
+      ${toc.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}
+    </nav>
+
     ${details.length ? `
-      <div class="profile-details">
+      <section id="profile-section-details" class="profile-details">
         ${details.map(([label, value]) => `<div><span class="muted">${label}</span><span>${value}</span></div>`).join('')}
-      </div>
+      </section>
     ` : ''}
-    <h3>${isOwnProfile ? 'Your recent activity' : 'Recent activity'}</h3>
-    <div class="activity-log">
-      ${result.activity_log.map((l) => `
-        <div class="log-row">
-          <span>${escapeHtml(l.activity_name)}</span>
-          <span class="muted">${escapeHtml(l.activity_date)}</span>
-          <span class="num ${l.capped ? 'muted' : ''}">${l.capped ? 'capped' : '+' + l.points_awarded}</span>
-        </div>
-      `).join('') || '<p class="empty">No activity logged yet.</p>'}
-    </div>
+
+    <section id="profile-section-activities">
+      <h3>${isOwnProfile ? 'Your recent activity' : 'Recent activity'}</h3>
+      <div class="activity-log">
+        ${result.activity_log.map((l) => `
+          <div class="log-row">
+            <span>${escapeHtml(l.activity_name)}</span>
+            <span class="muted">${formatTimestamp(l.timestamp)}</span>
+            <span class="num ${l.capped ? 'muted' : ''}">${l.capped ? 'capped' : '+' + l.points_awarded}</span>
+            ${canDeleteTheirEntries ? `<button type="button" class="log-delete" data-log="${l.log_id}">Delete</button>` : ''}
+          </div>
+        `).join('') || '<p class="empty">No activity logged yet.</p>'}
+      </div>
+    </section>
+
+    ${isOwnProfile ? renderProfileEditForm(u) : ''}
+    ${showAdmin ? renderAdminBackupSection() : ''}
+
+    <a href="#profile-top" class="back-to-top">↑ Back to top</a>
   `;
 
-  if (isOwnProfile) {
-    panel.insertAdjacentHTML('beforeend', renderProfileEditForm(u));
-    wireProfileEditForm();
+  panel.querySelectorAll('.log-delete').forEach((btn) => {
+    btn.addEventListener('click', () => deleteActivityEntry(btn.dataset.log, btn, loadProfile));
+  });
 
-    if (me.role === 'admin') {
-      panel.insertAdjacentHTML('beforeend', renderAdminBackupSection());
-      wireAdminBackupSection();
-    }
+  if (isOwnProfile) {
+    wireProfileEditForm();
+    if (showAdmin) wireAdminBackupSection();
   }
 }
 
 function renderProfileEditForm(u) {
   return `
-    <h3>Edit your details</h3>
-    <form id="profile-edit-form" class="profile-edit-form">
-      <label>Name
-        <input type="text" id="edit-name" value="${escapeHtml(u.name)}" required />
-      </label>
-      <label>Role you're interested in <span class="muted">(optional)</span>
-        <input type="text" id="edit-interested-role" value="${escapeHtml(u.interested_role || '')}" placeholder="e.g. Senior Product Manager" />
-      </label>
-      <label>Email <span class="muted">(optional)</span>
-        <input type="email" id="edit-email" value="${escapeHtml(u.email || '')}" />
-      </label>
-      <label>Phone <span class="muted">(optional)</span>
-        <input type="tel" id="edit-phone" value="${escapeHtml(u.phone || '')}" />
-      </label>
-      <label>LinkedIn <span class="muted">(optional)</span>
-        <input type="url" id="edit-linkedin" value="${escapeHtml(u.linkedin_url || '')}" placeholder="https://linkedin.com/in/…" />
-      </label>
-      <button type="submit">Save</button>
-      <p id="profile-edit-result" class="result" hidden></p>
-    </form>
+    <section id="profile-section-edit">
+      <h3>Edit your details</h3>
+      <form id="profile-edit-form" class="profile-edit-form">
+        <label>Name
+          <input type="text" id="edit-name" value="${escapeHtml(u.name)}" required />
+        </label>
+        <label>Role you're interested in <span class="muted">(optional)</span>
+          <input type="text" id="edit-interested-role" value="${escapeHtml(u.interested_role || '')}" placeholder="e.g. Senior Product Manager" />
+        </label>
+        <label>Email <span class="muted">(optional)</span>
+          <input type="email" id="edit-email" value="${escapeHtml(u.email || '')}" />
+        </label>
+        <label>Phone <span class="muted">(optional)</span>
+          <input type="tel" id="edit-phone" value="${escapeHtml(u.phone || '')}" />
+        </label>
+        <label>LinkedIn <span class="muted">(optional)</span>
+          <input type="url" id="edit-linkedin" value="${escapeHtml(u.linkedin_url || '')}" placeholder="https://linkedin.com/in/…" />
+        </label>
+        <button type="submit">Save</button>
+        <p id="profile-edit-result" class="result" hidden></p>
+      </form>
+    </section>
   `;
 }
 
@@ -511,15 +568,17 @@ async function handleProfileEditSubmit(e) {
 
 function renderAdminBackupSection() {
   return `
-    <h3>Admin — Backup</h3>
-    <div class="admin-backup">
-      <button id="admin-export-btn" type="button">Export to Excel</button>
-      <div class="admin-import">
-        <input type="file" id="admin-import-file" accept=".xlsx" />
-        <button id="admin-import-btn" type="button">Restore from file</button>
+    <section id="profile-section-admin">
+      <h3>Admin — Backup</h3>
+      <div class="admin-backup">
+        <button id="admin-export-btn" type="button">Export to Excel</button>
+        <div class="admin-import">
+          <input type="file" id="admin-import-file" accept=".xlsx" />
+          <button id="admin-import-btn" type="button">Restore from file</button>
+        </div>
+        <p id="admin-backup-result" class="result" hidden></p>
       </div>
-      <p id="admin-backup-result" class="result" hidden></p>
-    </div>
+    </section>
   `;
 }
 

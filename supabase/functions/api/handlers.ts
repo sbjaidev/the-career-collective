@@ -204,6 +204,7 @@ export async function handleProfile(db: SupabaseClient, params: Params) {
     log_id: l.log_id,
     activity_name: configById[l.activity_id]?.activity_name || l.activity_id,
     activity_date: l.activity_date,
+    timestamp: l.created_at,
     points_awarded: l.points_awarded,
     capped: l.capped,
     note_or_link: l.note_or_link,
@@ -412,6 +413,26 @@ export async function handleDeleteComment(db: SupabaseClient, params: Params) {
   if (comment.user_id !== userId) return { ok: false, error: "You can only delete your own comments." };
 
   await db.from("wall_comments").delete().eq("comment_id", commentId);
+  return { ok: true };
+}
+
+// Deletable by the entry's own author, or by an admin (of anyone's entry).
+// Reactions and comments on it are cleaned up automatically — both tables
+// reference activity_log with ON DELETE CASCADE.
+export async function handleDeleteActivity(db: SupabaseClient, params: Params) {
+  const userId = await requireAuth(params);
+  const logId = params.log_id;
+
+  const { data: entry } = await db.from("activity_log").select("user_id").eq("log_id", logId).maybeSingle();
+  if (!entry) return { ok: false, error: "Entry not found." };
+
+  if (entry.user_id !== userId) {
+    const { data: me } = await db.from("users").select("role").eq("user_id", userId).maybeSingle();
+    if (!me || me.role !== "admin") return { ok: false, error: "You can only delete your own entries." };
+  }
+
+  const { error } = await db.from("activity_log").delete().eq("log_id", logId);
+  if (error) return { ok: false, error: "Something went wrong: " + error.message };
   return { ok: true };
 }
 

@@ -33,6 +33,7 @@ Deno.serve(async (req: Request) => {
       case "react": return jsonResponse(await handlers.handleReact(db, params));
       case "comment": return jsonResponse(await handlers.handleComment(db, params));
       case "deleteComment": return jsonResponse(await handlers.handleDeleteComment(db, params));
+      case "deleteActivity": return jsonResponse(await handlers.handleDeleteActivity(db, params));
       case "leaderboard": return jsonResponse(await handlers.handleLeaderboard(db, params));
       case "profile": return jsonResponse(await handlers.handleProfile(db, params));
       case "updateProfile": return jsonResponse(await handlers.handleUpdateProfile(db, params));
