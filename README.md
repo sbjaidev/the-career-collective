@@ -120,9 +120,68 @@ Unchanged — Netlify still just publishes the `frontend/` folder per
   hand-built spreadsheet — and it asks for confirmation before running,
   since it can overwrite live rows with matching IDs.
 
+## Development workflow
+
+Changes go through a branch and a pull request, not straight onto `main` —
+`main` is what Netlify auto-deploys, so merging is the "publish" step.
+
+```
+git checkout -b feature/whatever-it-is
+# make changes, commit
+git push -u origin feature/whatever-it-is
+gh pr create
+# merge when ready to actually go live
+```
+
+`main` has branch protection (pull request required, force-push and branch
+deletion blocked). The repo owner can still merge without waiting on a
+second reviewer — there's no one else to review yet — but everyone else
+would need an approval.
+
+**Previewing a branch before merging**, against the real (already-live)
+Supabase backend:
+
+```bash
+git checkout feature/whatever-it-is
+python3 -m http.server 8811 --directory frontend
+```
+
+Open `http://localhost:8811`. No build step, no separate config needed —
+`frontend/js/config.js` already has the real project's URL and anon key
+committed (see the security note below for why that's fine).
+
+**Deploying backend changes**: Supabase doesn't know about git branches —
+`supabase functions deploy api` pushes whatever's on disk straight to the
+live project, regardless of which git branch you're on. New Edge Function
+code and schema changes are safe to deploy ahead of merging the frontend
+PR as long as they're additive (new columns/tables/actions), since the
+currently-live frontend simply won't call anything it doesn't know about
+yet.
+
+## Security note: what's safe to commit here
+
+`frontend/js/config.js` has a real credential in it — `SUPABASE_ANON_KEY`
+— committed to a public repo, on purpose. Supabase's anon key is designed
+to sit in public client-side code; it isn't a secret the way the pieces
+below are:
+
+- Every table has Row Level Security enabled with **zero policies** for
+  anon/authenticated — the anon key alone can't read or write anything
+  directly against Postgres. It only gets past Supabase's own platform
+  gate before a request reaches the Edge Function.
+- The **service_role key**, which actually bypasses RLS, is never in any
+  file — Supabase injects it into the Edge Function's environment
+  automatically at runtime.
+- **`SESSION_SECRET`** (signs login tokens) is set once via
+  `supabase secrets set` and likewise never written to disk in this repo.
+
+If any of those three ever end up in a file here, that's a real problem —
+anon key alone is not.
+
 ## Tuning after launch
 
-Same as before: edit rows in `activities_config` directly (points, caps,
-`surface_on_wall`) — the app reads it live, no redeploy needed. Redeploying
-is only required when the Edge Function *code* changes:
-`supabase functions deploy api`.
+Edit rows in `activities_config` directly (points, caps, `surface_on_wall`,
+and `job_functions` — which activities show up as goal-setting candidates
+for which job type) or in `user_goals` (per-person goal targets) — the app
+reads all of it live, no redeploy needed. Redeploying is only required
+when the Edge Function *code* changes: `supabase functions deploy api`.

@@ -543,18 +543,22 @@ function renderGoalsList(goals, isOwnProfile) {
     if (g.target_count <= 1) {
       const done = g.current_count >= g.target_count;
       return `
-        <div class="goal-row goal-row-check">
-          <span class="goal-checkbox ${done ? 'done' : ''}" aria-hidden="true">${done ? '✓' : ''}</span>
+        <div class="goal-row">
           <span>${escapeHtml(g.activity_name)}</span>
+          <span class="goal-indicator">
+            <span class="goal-checkbox ${done ? 'done' : ''}" aria-hidden="true">${done ? '✓' : ''}</span>
+          </span>
         </div>
       `;
     }
     const pct = Math.min(100, Math.round((g.current_count / g.target_count) * 100));
     return `
-      <div class="goal-row goal-row-progress">
+      <div class="goal-row">
         <span>${escapeHtml(g.activity_name)}</span>
-        <div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%"></div></div>
-        <span class="num muted">${g.current_count}/${g.target_count}</span>
+        <span class="goal-indicator">
+          <div class="goal-bar"><div class="goal-bar-fill" style="width:${pct}%"></div></div>
+          <span class="num muted">${g.current_count}/${g.target_count}</span>
+        </span>
       </div>
     `;
   }).join('');
