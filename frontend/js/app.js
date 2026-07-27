@@ -1,6 +1,7 @@
 let wallPollTimer = null;
 let activitiesCache = null;
 let hiddenAt = null;
+let viewingUserId = null; // null = viewing your own profile
 
 const SESSION_TIMEOUT_MS = 30 * 24 * 3600 * 1000; // 30 days, same as the World Cup app
 
@@ -25,7 +26,10 @@ function init() {
   document.getElementById('login-form').addEventListener('submit', handleLogin);
   document.getElementById('logout-btn').addEventListener('click', handleLogout);
   document.querySelectorAll('.tab-btn').forEach((btn) => {
-    btn.addEventListener('click', () => switchPanel(btn.dataset.panel));
+    btn.addEventListener('click', () => {
+      if (btn.dataset.panel === 'profile') viewingUserId = null;
+      switchPanel(btn.dataset.panel);
+    });
   });
   document.addEventListener('visibilitychange', handleVisibilityChange);
 
@@ -116,6 +120,13 @@ function switchPanel(name) {
   if (name === 'profile') loadProfile();
 }
 
+// Called by clicking a name on the Wall or Leaderboard — jumps to that
+// person's profile regardless of which tab is currently open.
+function openProfile(userId) {
+  viewingUserId = userId;
+  switchPanel('profile');
+}
+
 // ---- Wall ----
 
 function startWallPolling() {
@@ -171,7 +182,7 @@ function renderWall(entries) {
     return `
       <article class="wall-card">
         <div class="wall-card-head">
-          <span class="wall-name">${escapeHtml(entry.name)}</span>
+          <button type="button" class="wall-name" data-user="${entry.user_id}">${escapeHtml(entry.name)}</button>
           <span class="pill">${escapeHtml(entry.team_name)}</span>
           <span class="wall-points">+${entry.points_awarded}</span>
         </div>
@@ -190,6 +201,9 @@ function renderWall(entries) {
     `;
   }).join('');
 
+  panel.querySelectorAll('.wall-name').forEach((btn) => {
+    btn.addEventListener('click', () => openProfile(btn.dataset.user));
+  });
   panel.querySelectorAll('.quick-react').forEach((btn) => {
     btn.addEventListener('click', () => reactToEntry(btn.dataset.log, btn.dataset.emoji, btn));
   });
@@ -283,7 +297,9 @@ async function loadLeaderboard(scope) {
         ${result.rows.map((r, i) => `
           <tr>
             <td>${i + 1}</td>
-            <td>${escapeHtml(scope === 'team' ? r.team_name : r.name)}</td>
+            <td>${scope === 'team'
+              ? escapeHtml(r.team_name)
+              : `<button type="button" class="lb-name-link" data-user="${r.user_id}">${escapeHtml(r.name)}</button>`}</td>
             <td class="muted">${escapeHtml(scope === 'team' ? r.job_function : r.team_name)}</td>
             <td class="num">${r.points}</td>
           </tr>
@@ -291,6 +307,9 @@ async function loadLeaderboard(scope) {
       </tbody>
     </table>
   `;
+  rowsEl.querySelectorAll('.lb-name-link').forEach((btn) => {
+    btn.addEventListener('click', () => openProfile(btn.dataset.user));
+  });
 }
 
 // ---- Submit activity ----
@@ -376,22 +395,38 @@ async function handleSubmitActivity(e) {
 
 async function loadProfile() {
   const panel = document.getElementById('panel-profile');
-  const { user } = Session.get();
-  const result = await Api.get('profile', { user_id: user.user_id });
+  const me = Session.get().user;
+  const targetUserId = viewingUserId || me.user_id;
+  const isOwnProfile = targetUserId === me.user_id;
+
+  const result = await Api.get('profile', { user_id: targetUserId });
   if (!result.ok) {
     panel.innerHTML = '<p class="empty">Could not load profile.</p>';
     return;
   }
+  const u = result.user;
+
+  const details = [
+    u.interested_role ? ['Interested in', escapeHtml(u.interested_role)] : null,
+    u.email ? ['Email', `<a href="mailto:${escapeHtml(u.email)}">${escapeHtml(u.email)}</a>`] : null,
+    u.phone ? ['Phone', escapeHtml(u.phone)] : null,
+    u.linkedin_url ? ['LinkedIn', `<a href="${escapeHtml(u.linkedin_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.linkedin_url)}</a>`] : null,
+  ].filter(Boolean);
 
   panel.innerHTML = `
     <div class="profile-head">
       <div class="profile-points">${result.total_points}</div>
       <div class="profile-meta">
-        <div>${escapeHtml(result.user.name)}</div>
-        <div class="muted">${escapeHtml(result.user.team_name)} · Rank #${result.rank}</div>
+        <div>${escapeHtml(u.name)}</div>
+        <div class="muted">${escapeHtml(u.team_name || u.job_function || '')} · Rank #${result.rank}</div>
       </div>
     </div>
-    <h3>Activity</h3>
+    ${details.length ? `
+      <div class="profile-details">
+        ${details.map(([label, value]) => `<div><span class="muted">${label}</span><span>${value}</span></div>`).join('')}
+      </div>
+    ` : ''}
+    <h3>${isOwnProfile ? 'Your recent activity' : 'Recent activity'}</h3>
     <div class="activity-log">
       ${result.activity_log.map((l) => `
         <div class="log-row">
@@ -403,10 +438,73 @@ async function loadProfile() {
     </div>
   `;
 
-  if (result.user.role === 'admin') {
-    panel.insertAdjacentHTML('beforeend', renderAdminBackupSection());
-    wireAdminBackupSection();
+  if (isOwnProfile) {
+    panel.insertAdjacentHTML('beforeend', renderProfileEditForm(u));
+    wireProfileEditForm();
+
+    if (me.role === 'admin') {
+      panel.insertAdjacentHTML('beforeend', renderAdminBackupSection());
+      wireAdminBackupSection();
+    }
   }
+}
+
+function renderProfileEditForm(u) {
+  return `
+    <h3>Edit your details</h3>
+    <form id="profile-edit-form" class="profile-edit-form">
+      <label>Name
+        <input type="text" id="edit-name" value="${escapeHtml(u.name)}" required />
+      </label>
+      <label>Role you're interested in <span class="muted">(optional)</span>
+        <input type="text" id="edit-interested-role" value="${escapeHtml(u.interested_role || '')}" placeholder="e.g. Senior Product Manager" />
+      </label>
+      <label>Email <span class="muted">(optional)</span>
+        <input type="email" id="edit-email" value="${escapeHtml(u.email || '')}" />
+      </label>
+      <label>Phone <span class="muted">(optional)</span>
+        <input type="tel" id="edit-phone" value="${escapeHtml(u.phone || '')}" />
+      </label>
+      <label>LinkedIn <span class="muted">(optional)</span>
+        <input type="url" id="edit-linkedin" value="${escapeHtml(u.linkedin_url || '')}" placeholder="https://linkedin.com/in/…" />
+      </label>
+      <button type="submit">Save</button>
+      <p id="profile-edit-result" class="result" hidden></p>
+    </form>
+  `;
+}
+
+function wireProfileEditForm() {
+  document.getElementById('profile-edit-form').addEventListener('submit', handleProfileEditSubmit);
+}
+
+async function handleProfileEditSubmit(e) {
+  e.preventDefault();
+  const button = e.target.querySelector('button');
+  const resultEl = document.getElementById('profile-edit-result');
+  button.disabled = true;
+  button.textContent = 'Saving…';
+
+  const result = await Api.authedPost('updateProfile', {
+    name: document.getElementById('edit-name').value,
+    interested_role: document.getElementById('edit-interested-role').value,
+    email: document.getElementById('edit-email').value,
+    phone: document.getElementById('edit-phone').value,
+    linkedin_url: document.getElementById('edit-linkedin').value,
+  });
+
+  button.disabled = false;
+  button.textContent = 'Save';
+  resultEl.hidden = false;
+
+  if (!result.ok) {
+    resultEl.textContent = result.error;
+    resultEl.className = 'result error';
+    return;
+  }
+  resultEl.textContent = 'Saved.';
+  resultEl.className = 'result success';
+  setTimeout(loadProfile, 700);
 }
 
 // ---- Admin: export / import backup ----
