@@ -38,7 +38,10 @@ const PRIMARY_KEYS: Record<string, string> = {
 // that was blank in the backup, instead of actually resetting it to null.
 const ALL_COLUMNS: Record<string, string[]> = {
   teams: ["team_id", "team_name", "job_function", "captain_user_id", "mentor_user_ids", "created_date"],
-  users: ["user_id", "name", "username", "pin", "job_function", "team_id", "role", "joined_date", "active"],
+  users: [
+    "user_id", "name", "username", "pin", "job_function", "team_id", "role",
+    "email", "phone", "linkedin_url", "interested_role", "joined_date", "active",
+  ],
   activities_config: [
     "activity_id", "activity_name", "category", "base_points",
     "weekly_cap_units", "cap_window", "evidence_hint", "surface_on_wall", "active",

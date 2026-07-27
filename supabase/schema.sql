@@ -22,13 +22,19 @@ create table teams (
 );
 
 create table users (
-  user_id      text primary key,
-  name         text not null,
-  username     text not null unique,
-  pin          text not null,
-  job_function text,
-  team_id      text references teams(team_id),
-  role         text not null default 'participant',
+  user_id          text primary key,
+  name             text not null,
+  username         text not null unique,
+  pin              text not null,
+  job_function     text,
+  team_id          text references teams(team_id),
+  role             text not null default 'participant',
+  -- Profile fields — all optional, editable only by the user themselves,
+  -- visible to any logged-in viewer (peer-support app, not a public site).
+  email            text,
+  phone            text,
+  linkedin_url     text,
+  interested_role  text,
   joined_date  date not null default current_date,
   active       boolean not null default true
 );

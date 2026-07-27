@@ -1,6 +1,7 @@
 let wallPollTimer = null;
 let activitiesCache = null;
 let hiddenAt = null;
+let viewingUserId = null; // null = viewing your own profile
 
 const SESSION_TIMEOUT_MS = 30 * 24 * 3600 * 1000; // 30 days, same as the World Cup app
 
@@ -8,6 +9,32 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str ?? '';
   return div.innerHTML;
+}
+
+function formatTimestamp(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+// Shared by the Wall and by Profile — deletable by the entry's own author,
+// or by an admin (of anyone's entry); the server enforces this too, this
+// is just what decides whether the control renders at all.
+function canDeleteEntry(entryUserId) {
+  const me = Session.get()?.user;
+  return me && (entryUserId === me.user_id || me.role === 'admin');
+}
+
+async function deleteActivityEntry(logId, btn, onSuccess) {
+  const confirmed = confirm('Delete this entry? This also removes its points and cannot be undone.');
+  if (!confirmed) return;
+  btn.disabled = true;
+  const result = await Api.authedPost('deleteActivity', { log_id: logId });
+  if (!result.ok) {
+    btn.disabled = false;
+    alert(result.error || 'Could not delete entry.');
+    return;
+  }
+  onSuccess();
 }
 
 function getActivePanel() {
@@ -25,7 +52,10 @@ function init() {
   document.getElementById('login-form').addEventListener('submit', handleLogin);
   document.getElementById('logout-btn').addEventListener('click', handleLogout);
   document.querySelectorAll('.tab-btn').forEach((btn) => {
-    btn.addEventListener('click', () => switchPanel(btn.dataset.panel));
+    btn.addEventListener('click', () => {
+      if (btn.dataset.panel === 'profile') viewingUserId = null;
+      switchPanel(btn.dataset.panel);
+    });
   });
   document.addEventListener('visibilitychange', handleVisibilityChange);
 
@@ -116,6 +146,13 @@ function switchPanel(name) {
   if (name === 'profile') loadProfile();
 }
 
+// Called by clicking a name on the Wall or Leaderboard — jumps to that
+// person's profile regardless of which tab is currently open.
+function openProfile(userId) {
+  viewingUserId = userId;
+  switchPanel('profile');
+}
+
 // ---- Wall ----
 
 function startWallPolling() {
@@ -171,12 +208,16 @@ function renderWall(entries) {
     return `
       <article class="wall-card">
         <div class="wall-card-head">
-          <span class="wall-name">${escapeHtml(entry.name)}</span>
+          <button type="button" class="wall-name" data-user="${entry.user_id}">${escapeHtml(entry.name)}</button>
           <span class="pill">${escapeHtml(entry.team_name)}</span>
           <span class="wall-points">+${entry.points_awarded}</span>
         </div>
         <div class="wall-activity">${escapeHtml(entry.activity_name)}</div>
         ${entry.note_or_link ? `<div class="wall-note">${escapeHtml(entry.note_or_link)}</div>` : ''}
+        <div class="wall-card-foot">
+          <span class="wall-timestamp muted">${formatTimestamp(entry.timestamp)}</span>
+          ${canDeleteEntry(entry.user_id) ? `<button type="button" class="wall-delete" data-log="${entry.log_id}">Delete</button>` : ''}
+        </div>
         <div class="wall-reactions">
           ${reactionChips}
           <span class="quick-react-row">${quickButtons}</span>
@@ -190,11 +231,17 @@ function renderWall(entries) {
     `;
   }).join('');
 
+  panel.querySelectorAll('.wall-name').forEach((btn) => {
+    btn.addEventListener('click', () => openProfile(btn.dataset.user));
+  });
   panel.querySelectorAll('.quick-react').forEach((btn) => {
     btn.addEventListener('click', () => reactToEntry(btn.dataset.log, btn.dataset.emoji, btn));
   });
   panel.querySelectorAll('.comment-delete').forEach((btn) => {
     btn.addEventListener('click', () => deleteComment(btn.dataset.comment, btn));
+  });
+  panel.querySelectorAll('.wall-delete').forEach((btn) => {
+    btn.addEventListener('click', () => deleteActivityEntry(btn.dataset.log, btn, loadWall));
   });
   panel.querySelectorAll('.comment-form').forEach((form) => {
     form.addEventListener('submit', (e) => {
@@ -283,7 +330,9 @@ async function loadLeaderboard(scope) {
         ${result.rows.map((r, i) => `
           <tr>
             <td>${i + 1}</td>
-            <td>${escapeHtml(scope === 'team' ? r.team_name : r.name)}</td>
+            <td>${scope === 'team'
+              ? escapeHtml(r.team_name)
+              : `<button type="button" class="lb-name-link" data-user="${r.user_id}">${escapeHtml(r.name)}</button>`}</td>
             <td class="muted">${escapeHtml(scope === 'team' ? r.job_function : r.team_name)}</td>
             <td class="num">${r.points}</td>
           </tr>
@@ -291,6 +340,9 @@ async function loadLeaderboard(scope) {
       </tbody>
     </table>
   `;
+  rowsEl.querySelectorAll('.lb-name-link').forEach((btn) => {
+    btn.addEventListener('click', () => openProfile(btn.dataset.user));
+  });
 }
 
 // ---- Submit activity ----
@@ -376,52 +428,157 @@ async function handleSubmitActivity(e) {
 
 async function loadProfile() {
   const panel = document.getElementById('panel-profile');
-  const { user } = Session.get();
-  const result = await Api.get('profile', { user_id: user.user_id });
+  const me = Session.get().user;
+  const targetUserId = viewingUserId || me.user_id;
+  const isOwnProfile = targetUserId === me.user_id;
+  const canDeleteTheirEntries = isOwnProfile || me.role === 'admin';
+
+  const result = await Api.get('profile', { user_id: targetUserId });
   if (!result.ok) {
     panel.innerHTML = '<p class="empty">Could not load profile.</p>';
     return;
   }
+  const u = result.user;
+
+  const details = [
+    u.interested_role ? ['Interested in', escapeHtml(u.interested_role)] : null,
+    u.email ? ['Email', `<a href="mailto:${escapeHtml(u.email)}">${escapeHtml(u.email)}</a>`] : null,
+    u.phone ? ['Phone', escapeHtml(u.phone)] : null,
+    u.linkedin_url ? ['LinkedIn', `<a href="${escapeHtml(u.linkedin_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u.linkedin_url)}</a>`] : null,
+  ].filter(Boolean);
+
+  const showAdmin = isOwnProfile && me.role === 'admin';
+  const toc = [
+    details.length ? ['profile-section-details', 'Details'] : null,
+    ['profile-section-activities', 'Activities'],
+    isOwnProfile ? ['profile-section-edit', 'Edit Details'] : null,
+    showAdmin ? ['profile-section-admin', 'Admin'] : null,
+  ].filter(Boolean);
 
   panel.innerHTML = `
-    <div class="profile-head">
+    <div class="profile-head" id="profile-top">
       <div class="profile-points">${result.total_points}</div>
       <div class="profile-meta">
-        <div>${escapeHtml(result.user.name)}</div>
-        <div class="muted">${escapeHtml(result.user.team_name)} · Rank #${result.rank}</div>
+        <div>${escapeHtml(u.name)}</div>
+        <div class="muted">${escapeHtml(u.team_name || u.job_function || '')} · Rank #${result.rank}</div>
       </div>
     </div>
-    <h3>Activity</h3>
-    <div class="activity-log">
-      ${result.activity_log.map((l) => `
-        <div class="log-row">
-          <span>${escapeHtml(l.activity_name)}</span>
-          <span class="muted">${escapeHtml(l.activity_date)}</span>
-          <span class="num ${l.capped ? 'muted' : ''}">${l.capped ? 'capped' : '+' + l.points_awarded}</span>
-        </div>
-      `).join('') || '<p class="empty">No activity logged yet.</p>'}
-    </div>
+
+    <nav class="profile-toc">
+      ${toc.map(([id, label]) => `<a href="#${id}">${label}</a>`).join('')}
+    </nav>
+
+    ${details.length ? `
+      <section id="profile-section-details" class="profile-details">
+        ${details.map(([label, value]) => `<div><span class="muted">${label}</span><span>${value}</span></div>`).join('')}
+      </section>
+    ` : ''}
+
+    <section id="profile-section-activities">
+      <h3>${isOwnProfile ? 'Your recent activity' : 'Recent activity'}</h3>
+      <div class="activity-log">
+        ${result.activity_log.map((l) => `
+          <div class="log-row">
+            <span>${escapeHtml(l.activity_name)}</span>
+            <span class="muted">${formatTimestamp(l.timestamp)}</span>
+            <span class="num ${l.capped ? 'muted' : ''}">${l.capped ? 'capped' : '+' + l.points_awarded}</span>
+            ${canDeleteTheirEntries ? `<button type="button" class="log-delete" data-log="${l.log_id}">Delete</button>` : ''}
+          </div>
+        `).join('') || '<p class="empty">No activity logged yet.</p>'}
+      </div>
+    </section>
+
+    ${isOwnProfile ? renderProfileEditForm(u) : ''}
+    ${showAdmin ? renderAdminBackupSection() : ''}
+
+    <a href="#profile-top" class="back-to-top">↑ Back to top</a>
   `;
 
-  if (result.user.role === 'admin') {
-    panel.insertAdjacentHTML('beforeend', renderAdminBackupSection());
-    wireAdminBackupSection();
+  panel.querySelectorAll('.log-delete').forEach((btn) => {
+    btn.addEventListener('click', () => deleteActivityEntry(btn.dataset.log, btn, loadProfile));
+  });
+
+  if (isOwnProfile) {
+    wireProfileEditForm();
+    if (showAdmin) wireAdminBackupSection();
   }
+}
+
+function renderProfileEditForm(u) {
+  return `
+    <section id="profile-section-edit">
+      <h3>Edit your details</h3>
+      <form id="profile-edit-form" class="profile-edit-form">
+        <label>Name
+          <input type="text" id="edit-name" value="${escapeHtml(u.name)}" required />
+        </label>
+        <label>Role you're interested in <span class="muted">(optional)</span>
+          <input type="text" id="edit-interested-role" value="${escapeHtml(u.interested_role || '')}" placeholder="e.g. Senior Product Manager" />
+        </label>
+        <label>Email <span class="muted">(optional)</span>
+          <input type="email" id="edit-email" value="${escapeHtml(u.email || '')}" />
+        </label>
+        <label>Phone <span class="muted">(optional)</span>
+          <input type="tel" id="edit-phone" value="${escapeHtml(u.phone || '')}" />
+        </label>
+        <label>LinkedIn <span class="muted">(optional)</span>
+          <input type="url" id="edit-linkedin" value="${escapeHtml(u.linkedin_url || '')}" placeholder="https://linkedin.com/in/…" />
+        </label>
+        <button type="submit">Save</button>
+        <p id="profile-edit-result" class="result" hidden></p>
+      </form>
+    </section>
+  `;
+}
+
+function wireProfileEditForm() {
+  document.getElementById('profile-edit-form').addEventListener('submit', handleProfileEditSubmit);
+}
+
+async function handleProfileEditSubmit(e) {
+  e.preventDefault();
+  const button = e.target.querySelector('button');
+  const resultEl = document.getElementById('profile-edit-result');
+  button.disabled = true;
+  button.textContent = 'Saving…';
+
+  const result = await Api.authedPost('updateProfile', {
+    name: document.getElementById('edit-name').value,
+    interested_role: document.getElementById('edit-interested-role').value,
+    email: document.getElementById('edit-email').value,
+    phone: document.getElementById('edit-phone').value,
+    linkedin_url: document.getElementById('edit-linkedin').value,
+  });
+
+  button.disabled = false;
+  button.textContent = 'Save';
+  resultEl.hidden = false;
+
+  if (!result.ok) {
+    resultEl.textContent = result.error;
+    resultEl.className = 'result error';
+    return;
+  }
+  resultEl.textContent = 'Saved.';
+  resultEl.className = 'result success';
+  setTimeout(loadProfile, 700);
 }
 
 // ---- Admin: export / import backup ----
 
 function renderAdminBackupSection() {
   return `
-    <h3>Admin — Backup</h3>
-    <div class="admin-backup">
-      <button id="admin-export-btn" type="button">Export to Excel</button>
-      <div class="admin-import">
-        <input type="file" id="admin-import-file" accept=".xlsx" />
-        <button id="admin-import-btn" type="button">Restore from file</button>
+    <section id="profile-section-admin">
+      <h3>Admin — Backup</h3>
+      <div class="admin-backup">
+        <button id="admin-export-btn" type="button">Export to Excel</button>
+        <div class="admin-import">
+          <input type="file" id="admin-import-file" accept=".xlsx" />
+          <button id="admin-import-btn" type="button">Restore from file</button>
+        </div>
+        <p id="admin-backup-result" class="result" hidden></p>
       </div>
-      <p id="admin-backup-result" class="result" hidden></p>
-    </div>
+    </section>
   `;
 }
 
