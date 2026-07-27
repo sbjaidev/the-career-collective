@@ -4,3 +4,9 @@ node_modules/
 *.log
 .claude/settings.local.json
 supabase/.temp/
+
+# Internal planning docs — shared directly (e.g. as PDF), not published in the repo
+/ROADMAP.md
+/ROADMAP.pdf
+/docs/qa-testing-spec.md
+/docs/qa-testing-spec.pdf
