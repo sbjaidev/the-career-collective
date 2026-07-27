@@ -1,0 +1,12 @@
+# Merge this into the config.toml that `supabase init` generates.
+#
+# `api` keeps the default JWT check (verify_jwt = true) — the frontend
+# calls it like any Supabase client, with the public anon key as the
+# Authorization bearer token. That's a platform-level gate just to prove
+# the request came from something holding a Supabase key; the app's own
+# username+PIN auth is what actually protects user-specific actions.
+#
+# `daily-backup` disables it because pg_cron invokes it directly with no
+# auth header at all — it's a fixed system job with no user input.
+[functions.daily-backup]
+verify_jwt = false

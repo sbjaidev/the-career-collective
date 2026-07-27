@@ -395,6 +395,109 @@ async function loadProfile() {
       `).join('') || '<p class="empty">No activity logged yet.</p>'}
     </div>
   `;
+
+  if (result.user.role === 'admin') {
+    panel.insertAdjacentHTML('beforeend', renderAdminBackupSection());
+    wireAdminBackupSection();
+  }
+}
+
+// ---- Admin: export / import backup ----
+
+function renderAdminBackupSection() {
+  return `
+    <h3>Admin — Backup</h3>
+    <div class="admin-backup">
+      <button id="admin-export-btn" type="button">Export to Excel</button>
+      <div class="admin-import">
+        <input type="file" id="admin-import-file" accept=".xlsx" />
+        <button id="admin-import-btn" type="button">Restore from file</button>
+      </div>
+      <p id="admin-backup-result" class="result" hidden></p>
+    </div>
+  `;
+}
+
+function wireAdminBackupSection() {
+  document.getElementById('admin-export-btn').addEventListener('click', handleAdminExport);
+  document.getElementById('admin-import-btn').addEventListener('click', handleAdminImport);
+}
+
+function showAdminBackupResult(message, kind) {
+  const resultEl = document.getElementById('admin-backup-result');
+  resultEl.hidden = false;
+  resultEl.textContent = message;
+  resultEl.className = `result ${kind}`;
+}
+
+async function handleAdminExport() {
+  const btn = document.getElementById('admin-export-btn');
+  btn.disabled = true;
+  btn.textContent = 'Exporting…';
+
+  const result = await Api.authedPost('export', {});
+
+  btn.disabled = false;
+  btn.textContent = 'Export to Excel';
+
+  if (!result.ok) {
+    showAdminBackupResult(result.error, 'error');
+    return;
+  }
+  downloadBase64File(result.file_base64, result.filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  showAdminBackupResult(`Downloaded ${result.filename}`, 'success');
+}
+
+async function handleAdminImport() {
+  const fileInput = document.getElementById('admin-import-file');
+  const file = fileInput.files[0];
+  if (!file) {
+    showAdminBackupResult('Choose a .xlsx file first.', 'error');
+    return;
+  }
+  const confirmed = confirm(
+    'Restoring will overwrite any existing rows with matching IDs from this backup file. This cannot be undone. Continue?'
+  );
+  if (!confirmed) return;
+
+  const btn = document.getElementById('admin-import-btn');
+  btn.disabled = true;
+  btn.textContent = 'Restoring…';
+
+  const base64 = await fileToBase64(file);
+  const result = await Api.authedPost('import', { file_base64: base64 });
+
+  btn.disabled = false;
+  btn.textContent = 'Restore from file';
+
+  if (!result.ok) {
+    showAdminBackupResult(result.error, 'error');
+    return;
+  }
+  const summary = Object.entries(result.imported || {}).map(([table, count]) => `${table}: ${count}`).join(', ');
+  showAdminBackupResult(`Restored — ${summary}`, 'success');
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function downloadBase64File(base64, filename, mimeType) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 init();
