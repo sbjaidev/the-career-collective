@@ -6,8 +6,8 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 // Shown in the browser tab, the login screen, and the topbar — change these
 // to your own group's name. Nothing else in the code needs to know it.
-const APP_NAME = 'Career Premier League';
-const APP_SHORT_NAME = 'CPL';
+const APP_NAME = 'BKB Career Premier League';
+const APP_SHORT_NAME = 'BKB CPL';
 
 const WALL_POLL_INTERVAL_MS = 15000;
 const QUICK_REACTIONS = ['🔥', '💪', '🎉', '👏', '🚀'];

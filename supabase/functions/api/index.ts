@@ -37,6 +37,9 @@ Deno.serve(async (req: Request) => {
       case "leaderboard": return jsonResponse(await handlers.handleLeaderboard(db, params));
       case "profile": return jsonResponse(await handlers.handleProfile(db, params));
       case "updateProfile": return jsonResponse(await handlers.handleUpdateProfile(db, params));
+      case "getGoals": return jsonResponse(await handlers.handleGetGoals(db, params));
+      case "getGoalCandidates": return jsonResponse(await handlers.handleGoalCandidates(db, params));
+      case "updateGoals": return jsonResponse(await handlers.handleUpdateGoals(db, params));
       case "trends": return jsonResponse(await handlers.handleTrends(db, params));
       case "wall": return jsonResponse(await handlers.handleWall(db, params));
       case "activities": return jsonResponse(await handlers.handleActivitiesList(db));
