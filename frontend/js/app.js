@@ -14,7 +14,14 @@ function getActivePanel() {
   return document.querySelector('.tab-btn.active')?.dataset.panel;
 }
 
+function applyBranding() {
+  document.title = APP_NAME;
+  document.getElementById('login-title').textContent = APP_NAME;
+  document.getElementById('topbar-brand').textContent = APP_SHORT_NAME;
+}
+
 function init() {
+  applyBranding();
   document.getElementById('login-form').addEventListener('submit', handleLogin);
   document.getElementById('logout-btn').addEventListener('click', handleLogout);
   document.querySelectorAll('.tab-btn').forEach((btn) => {

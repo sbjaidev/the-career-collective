@@ -44,7 +44,7 @@ const Api = {
 };
 
 const Session = {
-  KEY: 'bkbcpl_session',
+  KEY: 'career_league_session',
 
   get() {
     const raw = localStorage.getItem(this.KEY);

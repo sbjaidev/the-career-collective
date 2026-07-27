@@ -1,6 +1,12 @@
 import * as XLSX from "npm:xlsx@0.18.5";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
+export const BACKUP_FILENAME_PREFIX = "career-league-backup";
+
+export function backupFilename(date = new Date()): string {
+  return `${BACKUP_FILENAME_PREFIX}-${date.toISOString().slice(0, 10)}.xlsx`;
+}
+
 // Import order matters: teams and activities_config have no dependencies,
 // users depends on teams, activity_log depends on users + activities_config,
 // wall_reactions/wall_comments depend on activity_log. Restoring in this

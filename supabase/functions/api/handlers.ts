@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { makeToken, requireAuth } from "../_shared/auth.ts";
 import {
+  backupFilename,
   buildWorkbook,
   normalizeRowForTable,
   primaryKeyFor,
@@ -382,7 +383,7 @@ export async function handleExport(db: SupabaseClient, params: Params) {
   await requireAdmin(db, params);
   const wb = await buildWorkbook(db);
   const base64 = workbookToBase64(wb);
-  const filename = `bkb-cpl-backup-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  const filename = backupFilename();
   return { ok: true, filename, file_base64: base64 };
 }
 

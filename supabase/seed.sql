@@ -16,7 +16,7 @@ insert into activities_config (activity_id, activity_name, category, base_points
   ('CRT',   'Course / certification module completed',       'Skill Building',      10,  2,  'week',  '',                    true),
   ('LIP',   'Wrote a LinkedIn post about the search',         'Community & Content', 10,  2,  'week',  'paste a link',        true),
   ('HLP',   'Helped a teammate (feedback, intro, advice)',    'Community & Content', 5,   3,  'week',  '',                    true),
-  ('EVT',   'Attended a BKB CPL event / webinar',             'Community & Content', 10,  null, null,  '',                    true)
+  ('EVT',   'Attended a league event / webinar',              'Community & Content', 10,  null, null,  '',                    true)
 on conflict (activity_id) do nothing;
 
 insert into season_config (key, value) values

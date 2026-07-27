@@ -1,4 +1,4 @@
-# BKB Career Premier League
+# Career Premier League
 
 Google Sheets + Apps Script is retired — this is now Supabase (Postgres +
 Edge Functions) end to end. The old Apps Script backend is gone from the
@@ -77,14 +77,17 @@ this under Database → Cron Jobs) → New cron job:
 - Function: `daily-backup`
 - Schedule: e.g. `0 3 * * *` (3am UTC daily)
 
-This writes `bkb-cpl-backup-YYYY-MM-DD.xlsx` into the `backups` bucket
-every day and prunes anything older than 14 days.
+This writes `career-league-backup-YYYY-MM-DD.xlsx` into the `backups`
+bucket every day and prunes anything older than 14 days.
 
 ## 8. Configure the frontend
 
 Open `frontend/js/config.js` and fill in:
 - `SUPABASE_FUNCTION_URL` — from step 5
 - `SUPABASE_ANON_KEY` — Project Settings → API → "anon public" key
+- `APP_NAME` / `APP_SHORT_NAME` — whatever your own group wants to call
+  itself; shown in the browser tab, login screen, and topbar. Nothing else
+  in the code needs to know your group's name.
 
 ## 9. Add people
 

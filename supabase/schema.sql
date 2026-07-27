@@ -1,4 +1,4 @@
--- BKB Career Premier League — Postgres schema
+-- Career Premier League — Postgres schema
 --
 -- Every table has Row Level Security enabled with NO policies for the
 -- anon/authenticated roles — the only way in is the Edge Function, which
