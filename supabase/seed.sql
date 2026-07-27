@@ -23,5 +23,5 @@ insert into season_config (key, value) values
   ('season_start_date', to_char(current_date, 'YYYY-MM-DD')),
   ('season_end_date',   to_char(current_date + interval '56 days', 'YYYY-MM-DD')),
   ('current_week', '1'),
-  ('timezone', 'Asia/Kolkata')
+  ('timezone', 'America/Los_Angeles')
 on conflict (key) do nothing;
