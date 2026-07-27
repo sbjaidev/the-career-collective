@@ -221,11 +221,49 @@ export async function handleProfile(db: SupabaseClient, params: Params) {
 
   return {
     ok: true,
-    user: { user_id: user.user_id, name: user.name, job_function: user.job_function, team_name: teamName, role: user.role },
+    user: {
+      user_id: user.user_id,
+      name: user.name,
+      job_function: user.job_function,
+      team_name: teamName,
+      role: user.role,
+      email: user.email,
+      phone: user.phone,
+      linkedin_url: user.linkedin_url,
+      interested_role: user.interested_role,
+    },
     total_points: totalPoints,
     rank,
     activity_log: myLog,
   };
+}
+
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const HTTP_URL_REGEX = /^https?:\/\//i;
+
+// Self-service only — userId comes from the verified token, never from a
+// client-supplied field, so there's no way to edit anyone else's row.
+export async function handleUpdateProfile(db: SupabaseClient, params: Params) {
+  const userId = await requireAuth(params);
+
+  const editable = ["name", "email", "phone", "linkedin_url", "interested_role"] as const;
+  const updates: Row = {};
+  for (const field of editable) {
+    if (field in params) updates[field] = String(params[field] ?? "").trim() || null;
+  }
+  if (Object.keys(updates).length === 0) return { ok: false, error: "Nothing to update." };
+
+  if ("name" in updates && !updates.name) return { ok: false, error: "Name cannot be empty." };
+  if (updates.email && !EMAIL_REGEX.test(updates.email)) {
+    return { ok: false, error: "That doesn't look like a valid email address." };
+  }
+  if (updates.linkedin_url && !HTTP_URL_REGEX.test(updates.linkedin_url)) {
+    return { ok: false, error: "LinkedIn URL must start with http:// or https://." };
+  }
+
+  const { error } = await db.from("users").update(updates).eq("user_id", userId);
+  if (error) return { ok: false, error: "Something went wrong: " + error.message };
+  return { ok: true };
 }
 
 // Computed live rather than from a stored snapshot table — at this scale
