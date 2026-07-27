@@ -1,65 +1,125 @@
 # BKB Career Premier League
 
-Google Sheet backend (via Apps Script) + static frontend (for Netlify). No build step, no npm dependencies.
+Google Sheets + Apps Script is retired — this is now Supabase (Postgres +
+Edge Functions) end to end. The old Apps Script backend is gone from the
+working tree, but still recoverable from git history (`git log` for the
+commits before the migration) if you ever need to look back at it.
 
 ```
-apps-script/   Apps Script source — paste into the Sheet's script editor
-frontend/      Static site — deploy this folder to Netlify
-netlify.toml   Tells Netlify to publish frontend/
+supabase/
+  schema.sql              run once in the SQL Editor
+  seed.sql                run once, right after schema.sql
+  config.toml             merge into what `supabase init` generates
+  functions/
+    api/                  the one function the frontend talks to
+    daily-backup/         scheduled — exports everything to Storage
+    _shared/               cors, db client, auth tokens, xlsx helpers
 ```
 
-## 1. Create the Google Sheet
+## 1. Create the project
 
-Create a new, blank Google Sheet. This becomes your database — nothing else to provision.
+[supabase.com](https://supabase.com) → New project. Free tier, no card
+required. Note the **Project Reference ID** (Project Settings → General) —
+you'll need it in step 3.
 
-## 2. Add the Apps Script backend
+## 2. Run the schema
 
-In the Sheet: **Extensions → Apps Script**. Delete the default `Code.gs` content, then create one script file per file in `apps-script/` (same names) and paste in the matching content: `Code.gs`, `Setup.gs`, `Utils.gs`, `Auth.gs`, `Activities.gs`, `Leaderboard.gs`, `Wall.gs`, `Config.gs`, `Triggers.gs`.
+Dashboard → **SQL Editor** → paste in `supabase/schema.sql` → Run. Then do
+the same with `supabase/seed.sql`. Both are safe to re-run later.
 
-Optional: in **Project Settings**, check "Show `appsscript.json` manifest file" and replace its contents with `apps-script/appsscript.json`. Not required — the same settings can be set by hand in the Deploy dialog in step 4.
+## 3. Install the CLI and link the project
 
-## 3. Run setup once
-
-In the script editor, select the `setupSheets` function from the dropdown next to Run, then click **Run**. Google will ask you to authorize the script — approve it (it's your own script, acting on your own Sheet).
-
-This creates all 8 tabs with headers, seeds `Activities_Config` with the 14 activities and their points/caps, seeds `Season_Config` with placeholder dates, and generates a session secret. Re-running it later is safe — it won't overwrite existing data.
-
-**Before the real season starts**, open `Season_Config` and set the real `season_start_date` and `season_end_date`.
-
-## 4. Deploy the web app
-
-**Deploy → New deployment → Select type: Web app.**
-- Execute as: **Me**
-- Who has access: **Anyone**
-
-Deploy, then copy the Web app URL (looks like `https://script.google.com/macros/s/AKfycb.../exec`).
-
-Every time you *edit* the Apps Script code later, you need a **new deployment version** (Deploy → Manage deployments → Edit → New version) for changes to go live — saving the file alone isn't enough.
-
-## 5. Point the frontend at it
-
-Open `frontend/js/config.js` and paste the Web app URL into `API_BASE_URL`.
-
-## 6. Try it locally
-
-```
-python3 -m http.server 8811 --directory frontend
+```bash
+brew install supabase/tap/supabase
+supabase login
 ```
 
-Open `http://localhost:8811`. You won't be able to log in until there's at least one row in `Users` (see below).
+Then from this project's root:
 
-## 7. Add people
+```bash
+supabase link --project-ref YOUR_PROJECT_REF
+```
 
-Onboarding is manual and one-time — add rows directly in `Users` and `Teams` while you form squads, then text each person their `username`, `pin`, and team name. `pin` should be typed as 4 digits; format the column as plain text first so Sheets doesn't drop leading zeros.
+## 4. Set the session secret
 
-**For a stakeholder demo before real onboarding**, add a few dummy rows to `Users`/`Teams` and some rows to `Activity_Log` to populate the Wall and leaderboard, then delete them once you're ready to onboard for real.
+```bash
+supabase secrets set SESSION_SECRET=$(openssl rand -hex 32)
+```
 
-## 8. Deploy to Netlify
+This is what signs login tokens — equivalent to the auto-generated secret
+`setupSheets()` created for the Apps Script version.
 
-Connect the repo (Netlify will read `netlify.toml` and publish `frontend/` automatically), or drag-and-drop the `frontend/` folder in the Netlify dashboard for a one-off deploy.
+## 5. Deploy the Edge Functions
+
+```bash
+supabase functions deploy api
+supabase functions deploy daily-backup
+```
+
+`supabase/config.toml` marks `daily-backup` as not requiring a JWT (it's
+called by a scheduled job with no auth header, not by the frontend). If
+your CLI version doesn't pick that up from the config file, deploy it
+explicitly instead: `supabase functions deploy daily-backup --no-verify-jwt`.
+
+After deploying `api`, note the URL it prints —
+`https://YOUR_PROJECT_REF.supabase.co/functions/v1/api`.
+
+## 6. Create the backups storage bucket
+
+Dashboard → **Storage** → New bucket → name it `backups` → keep it
+**private** (not public). This is where the daily automated backup lands.
+
+## 7. Schedule the daily backup
+
+Dashboard → **Integrations → Cron Jobs** (some dashboard versions list
+this under Database → Cron Jobs) → New cron job:
+- Type: Edge Function
+- Function: `daily-backup`
+- Schedule: e.g. `0 3 * * *` (3am UTC daily)
+
+This writes `bkb-cpl-backup-YYYY-MM-DD.xlsx` into the `backups` bucket
+every day and prunes anything older than 14 days.
+
+## 8. Configure the frontend
+
+Open `frontend/js/config.js` and fill in:
+- `SUPABASE_FUNCTION_URL` — from step 5
+- `SUPABASE_ANON_KEY` — Project Settings → API → "anon public" key
+
+## 9. Add people
+
+Same manual process as before, just in Supabase's **Table Editor** instead
+of a Google Sheet — it's a similar grid interface. Add rows to `teams`
+first, then `users` (so `team_id` foreign keys resolve). Format-wise:
+`pin` is a text column already, so leading zeros are preserved without
+needing to fix column formatting the way Sheets required.
+
+Since only test/dummy data exists in the current Sheets version — no real
+participants have been onboarded yet — there's nothing to migrate. Add
+your own row directly, or reuse the same fake test rows from before by
+pasting them into the Table Editor the same way you pasted them into
+Sheets.
+
+## 10. Deploy the frontend
+
+Unchanged — Netlify still just publishes the `frontend/` folder per
+`netlify.toml`.
+
+## The export/import backup feature
+
+- **Export** (My Profile tab, admin role only): downloads a `.xlsx` with
+  one sheet per table — the same thing the daily cron job produces, just
+  on demand.
+- **Import**: restores from that file. It upserts by each table's primary
+  key in dependency order (teams → users → activities → activity log →
+  reactions/comments), so restoring a whole backup works in one pass. It's
+  built to restore a file this app produced — not to accept an arbitrary
+  hand-built spreadsheet — and it asks for confirmation before running,
+  since it can overwrite live rows with matching IDs.
 
 ## Tuning after launch
 
-- **Points and caps**: edit rows in `Activities_Config` directly — no redeploy needed, the app reads it live.
-- **What shows on the Wall**: toggle `surface_on_wall` per activity in `Activities_Config`.
-- **Historical rank snapshots** (optional): run `installWeeklyTrigger()` once from the script editor if you want `Weekly_Snapshots` populated week over week. The live leaderboard and trends work fine without it.
+Same as before: edit rows in `activities_config` directly (points, caps,
+`surface_on_wall`) — the app reads it live, no redeploy needed. Redeploying
+is only required when the Edge Function *code* changes:
+`supabase functions deploy api`.
