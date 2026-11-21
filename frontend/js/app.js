@@ -1,9 +1,20 @@
 let wallPollTimer = null;
 let activitiesCache = null;
 let hiddenAt = null;
+let submitInFlight = false;
+let lastActivityAt = Date.now();
+let wallPollingIdle = false;
 let viewingUserId = null; // null = viewing your own profile
 
 const SESSION_TIMEOUT_MS = 30 * 24 * 3600 * 1000; // 30 days, same as the World Cup app
+
+// Today's date in the person's own timezone as YYYY-MM-DD. (toISOString is
+// UTC, which after ~5pm Pacific is already "tomorrow".)
+function localDateString() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 function escapeHtml(str) {
   const div = document.createElement('div');
@@ -73,6 +84,14 @@ function init() {
     });
   });
   document.addEventListener('visibilitychange', handleVisibilityChange);
+  Api.onAuthLost = () => {
+    stopWallPolling();
+    Session.clear();
+    showLogin();
+  };
+  // Any interaction counts as "someone is here"; see pollWallTick.
+  ['pointerdown', 'keydown', 'scroll', 'touchstart'].forEach((evt) =>
+    window.addEventListener(evt, noteActivity, { passive: true }));
 
   const session = Session.get();
   if (session && Date.now() - (session.loginTime || 0) < SESSION_TIMEOUT_MS) {
@@ -170,8 +189,19 @@ function openProfile(userId) {
 
 // ---- Wall ----
 
+function noteActivity() {
+  lastActivityAt = Date.now();
+  // Woken from the idle cutoff by a touch: refresh now and resume polling.
+  if (wallPollingIdle && !document.hidden && getActivePanel() === 'wall') {
+    wallPollingIdle = false;
+    loadWall();
+    startWallPolling();
+  }
+}
+
 function startWallPolling() {
   stopWallPolling();
+  wallPollingIdle = false;
   wallPollTimer = setInterval(pollWallTick, WALL_POLL_INTERVAL_MS);
 }
 
@@ -184,6 +214,11 @@ function stopWallPolling() {
 // whoever's typing, so a poll tick that lands while someone has a comment
 // field focused just skips itself — the next tick tries again.
 function pollWallTick() {
+  if (Date.now() - lastActivityAt > IDLE_STOP_MS) {
+    stopWallPolling();
+    wallPollingIdle = true;
+    return;
+  }
   if (document.activeElement?.matches('.comment-form input')) return;
   loadWall();
 }
@@ -392,7 +427,7 @@ async function loadSubmitForm() {
         </select>
       </label>
       <label>Date
-        <input type="date" id="submit-date" value="${new Date().toISOString().slice(0, 10)}" required />
+        <input type="date" id="submit-date" value="${localDateString()}" required />
       </label>
       <label>Note <span id="submit-note-hint" class="muted">(optional)</span>
         <input type="text" id="submit-note" maxlength="300" />
@@ -418,12 +453,19 @@ async function handleSubmitActivity(e) {
   const date = document.getElementById('submit-date').value;
   const note = document.getElementById('submit-note').value;
   const resultEl = document.getElementById('submit-result');
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  if (submitInFlight) return;
+  submitInFlight = true;
 
+  // Disabled while in flight so a double-tap can't log the entry twice.
+  submitBtn.disabled = true;
   const result = await Api.authedPost('submitActivity', {
     activity_id: activityId,
     activity_date: date,
     note_or_link: note
   });
+  submitBtn.disabled = false;
+  submitInFlight = false;
 
   resultEl.hidden = false;
   if (!result.ok) {
@@ -437,30 +479,40 @@ async function handleSubmitActivity(e) {
     : `+${result.points_awarded} points for "${result.activity_name}"`;
   resultEl.className = result.capped ? 'result warn' : 'result success';
   e.target.reset();
+  document.getElementById('submit-date').value = localDateString();
 }
 
 // ---- Profile ----
 
-async function loadProfile() {
+const PROFILE_PAGE_SIZE = 50;
+let profileLimit = PROFILE_PAGE_SIZE;
+
+async function loadProfile(opts) {
+  // A fresh visit starts at one page of history; "Show more" asks for more.
+  if (!(opts && opts.keepLimit)) profileLimit = PROFILE_PAGE_SIZE;
   const panel = document.getElementById('panel-profile');
   const me = Session.get().user;
   const targetUserId = viewingUserId || me.user_id;
   const isOwnProfile = targetUserId === me.user_id;
   const canDeleteTheirEntries = isOwnProfile || me.role === 'admin';
 
-  const [result, goalsResult, candidatesResult] = await Promise.all([
-    Api.get('profile', { user_id: targetUserId }),
-    Api.get('getGoals', { user_id: targetUserId }),
-    isOwnProfile ? Api.authedPost('getGoalCandidates', {}) : Promise.resolve(null),
-  ]);
+  // One request for everything (profile, goals, goal candidates, history)
+  // — it used to be three, each a separate server invocation.
+  const result = await Api.get('profile', {
+    user_id: targetUserId,
+    limit: profileLimit,
+    include_goals: true,
+    include_candidates: isOwnProfile,
+  });
 
   if (!result.ok) {
     panel.innerHTML = '<p class="empty">Could not load profile.</p>';
     return;
   }
   const u = result.user;
-  const goals = goalsResult.ok ? goalsResult.goals : [];
-  const candidates = candidatesResult?.ok ? candidatesResult.activities : [];
+  const goals = result.goals || [];
+  const candidates = result.goal_candidates || [];
+  const hasMore = result.total_entries > result.activity_log.length;
 
   const details = [
     u.interested_role ? ['Interested in', escapeHtml(u.interested_role)] : null,
@@ -515,6 +567,7 @@ async function loadProfile() {
           </div>
         `).join('') || '<p class="empty">No activity logged yet.</p>'}
       </div>
+      ${hasMore ? `<button type="button" id="profile-show-more" class="link-btn">Show more (${result.total_entries - result.activity_log.length} older)</button>` : ''}
     </section>
 
     ${isOwnProfile ? renderProfileEditForm(u) : ''}
@@ -525,7 +578,11 @@ async function loadProfile() {
   `;
 
   panel.querySelectorAll('.log-delete').forEach((btn) => {
-    btn.addEventListener('click', () => deleteActivityEntry(btn.dataset.log, btn, loadProfile));
+    btn.addEventListener('click', () => deleteActivityEntry(btn.dataset.log, btn, () => loadProfile({ keepLimit: true })));
+  });
+  document.getElementById('profile-show-more')?.addEventListener('click', () => {
+    profileLimit += PROFILE_PAGE_SIZE;
+    loadProfile({ keepLimit: true });
   });
 
   if (isOwnProfile) {

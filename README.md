@@ -27,6 +27,11 @@ you'll need it in step 3.
 Dashboard → **SQL Editor** → paste in `supabase/schema.sql` → Run. Then do
 the same with `supabase/seed.sql`. Both are safe to re-run later.
 
+Already running an older copy of the database? `supabase/upgrades/` holds
+one idempotent SQL file per change (newest: the scale views/indexes and the
+login-lockout table). Run any you haven't applied; fresh installs already
+get all of it from `schema.sql`.
+
 ## 3. Install the CLI and link the project
 
 ```bash
@@ -85,6 +90,10 @@ bucket every day and prunes anything older than 14 days.
 Open `frontend/js/config.js` and fill in:
 - `SUPABASE_FUNCTION_URL` — from step 5
 - `SUPABASE_ANON_KEY` — Project Settings → API → "anon public" key
+- `SUPABASE_FUNCTION_REGION` — the region your database lives in
+  (Project Settings → General), e.g. `us-east-1`. Sent as an `x-region`
+  header so the function runs next to the database; leave `''` to let
+  Supabase choose.
 - `APP_NAME` / `APP_SHORT_NAME` — whatever your own group wants to call
   itself; shown in the browser tab, login screen, and topbar. Nothing else
   in the code needs to know your group's name.
@@ -107,6 +116,78 @@ Sheets.
 
 Unchanged — Netlify still just publishes the `frontend/` folder per
 `netlify.toml`.
+
+## Before you launch to a group
+
+- **Set the season dates** in the `season_config` table
+  (`season_start_date`, `season_end_date`). Week numbers and the weekly
+  caps are computed from the start date.
+- Add everyone (step 9) and check that each person has a PIN.
+- Log in as the admin and press **Export to Excel** once, to confirm
+  backups work in your project.
+- Open the app on a phone *and* a laptop, log an activity, and watch it
+  appear on the Wall from the other device.
+
+## Scaling: how many people can this handle?
+
+Short answer: 50 daily users is comfortable — roughly 5× headroom on the
+free tier. What was done to get there, and what to watch:
+
+- **Totals are computed inside Postgres** (views `user_points`,
+  `user_week_points`, `user_activity_counts`) instead of by reading every
+  activity row into the function. Supabase silently caps any single query
+  at 1,000 rows, so the old approach would have shown wrong leaderboard
+  totals after about a week of real use. Anything that must read a whole
+  table (the backup) pages through it (`_shared/data.ts`).
+- **Fewer queries per request.** The Edge Function talks to Postgres over
+  HTTP, and each query costs ~15–20 ms of serialized overhead, so the
+  number of queries per request is the capacity lever. The Wall is one
+  query (reactions and comments embedded), a profile is one request, and
+  independent queries run in parallel.
+- **Calm polling.** The Wall refreshes every 30 s while the tab is
+  visible, pauses when it's hidden, and stops after 10 minutes without
+  interaction (`config.js`).
+- **Region pinning** (`SUPABASE_FUNCTION_REGION`) — the database is in one
+  region and the function should be too.
+
+Measured on the live free-tier project (`python3 scripts/loadtest.py`):
+sequential latency 300–500 ms per action; 30 users hitting it
+continuously (far above real behaviour) sustain ~17 requests/s with zero
+errors. Realistic peak for 50 daily users is ~10 queries/s; the ceiling
+is ≈ 40 queries/s.
+
+Limits to keep an eye on (check current values on the Supabase pricing
+page — they change): ~500K Edge Function invocations/month, 5 GB egress,
+500 MB database. A season at this size uses a small fraction of each.
+
+- **Backups are the first thing that will break as data grows.** Building
+  an `.xlsx` is CPU-heavy and Edge Functions have a CPU limit. Tested: an
+  export of ~10,000 activity rows (about 5.7 MB) completes in ~4 s; at
+  ~15,000 rows it fails with `WORKER_RESOURCE_LIMIT`. A 50-person season
+  should land at a few thousand rows, but if the activity log passes ~8,000
+  rows, switch the backup to a lighter format (JSON/CSV) before it silently
+  stops working. The daily cron backup uses the same code.
+- The daily backup also keeps the free project from being auto-paused for
+  inactivity.
+
+Re-run the load test any time with
+`python3 scripts/loadtest.py latency --region us-east-1` and
+`python3 scripts/loadtest.py load --users 30 --rounds 4 --region us-east-1`.
+
+## Sign-in security
+
+- Every read now needs a login token too — profiles carry email and phone
+  numbers, so they can't be open to anyone holding the public anon key.
+- Tokens expire server-side after 30 days.
+- After 10 wrong PINs in 15 minutes a username is locked out for the rest
+  of the window (`login_attempts` table), because a 4-digit PIN is only
+  10,000 guesses.
+- Rolling out the read-auth change over an older frontend:
+  `supabase secrets set ENFORCE_READ_AUTH=false`, deploy the new frontend,
+  then `supabase secrets unset ENFORCE_READ_AUTH`. Unset means enforced.
+
+Run the server-side unit tests with
+`deno test --allow-env supabase/functions/_shared/`.
 
 ## The export/import backup feature
 
