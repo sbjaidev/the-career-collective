@@ -9,5 +9,15 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const APP_NAME = 'BKB Career Premier League';
 const APP_SHORT_NAME = 'BKB CPL';
 
-const WALL_POLL_INTERVAL_MS = 15000;
+// Region the Edge Function should run in. The database lives in us-east-1,
+// so running the function next to it removes a cross-country hop from each
+// of the function's database queries. Leave '' to let Supabase pick the
+// region nearest the user. Set it to your database's region.
+const SUPABASE_FUNCTION_REGION = 'us-east-1';
+
+// The Wall refreshes every 30s while the tab is visible, and stops entirely
+// after IDLE_STOP_MS without a tap/scroll/keypress (a tab left open on a
+// desktop all day shouldn't keep polling). It resumes on the next touch.
+const WALL_POLL_INTERVAL_MS = 30000;
+const IDLE_STOP_MS = 10 * 60 * 1000;
 const QUICK_REACTIONS = ['🔥', '💪', '🎉', '👏', '🚀'];

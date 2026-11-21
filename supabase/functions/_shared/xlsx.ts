@@ -1,5 +1,6 @@
 import * as XLSX from "npm:xlsx@0.18.5";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
+import { fetchAll } from "./data.ts";
 
 export const BACKUP_FILENAME_PREFIX = "career-league-backup";
 
@@ -77,11 +78,18 @@ const TIMESTAMP_COLUMNS: Record<string, string[]> = {
 };
 
 export async function buildWorkbook(db: SupabaseClient) {
+  // Tables are independent of each other, so read them all at once — each
+  // one pages internally (see fetchAll for why a plain select isn't enough).
+  const tables = await Promise.all(
+    TABLES_IN_IMPORT_ORDER.map(async (table) => ({
+      table,
+      rows: await fetchAll(db, table, PRIMARY_KEYS[table].split(",")),
+    })),
+  );
+
   const wb = XLSX.utils.book_new();
-  for (const table of TABLES_IN_IMPORT_ORDER) {
-    const { data, error } = await db.from(table).select("*");
-    if (error) throw new Error(`Reading ${table} failed: ${error.message}`);
-    const sheet = XLSX.utils.json_to_sheet(data ?? []);
+  for (const { table, rows } of tables) {
+    const sheet = XLSX.utils.json_to_sheet(rows);
     XLSX.utils.book_append_sheet(wb, sheet, table.slice(0, 31)); // Excel sheet names cap at 31 chars
   }
   return wb;

@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
-import { makeToken, requireAuth } from "../_shared/auth.ts";
+import { makeToken, requireAuth, requireReadAuth } from "../_shared/auth.ts";
+import { fetchAll } from "../_shared/data.ts";
 import {
   backupFilename,
   buildWorkbook,
@@ -17,6 +18,16 @@ const EMOJI_REGEX = /^(\p{Emoji_Presentation}|\p{Extended_Pictographic})+$/u;
 type Row = Record<string, any>;
 // deno-lint-ignore no-explicit-any
 type Params = Record<string, any>;
+// deno-lint-ignore no-explicit-any
+type QueryResult = { data: any; error: { message: string } | null };
+
+// Unwraps a supabase-js result, turning a query error into a thrown one
+// (index.ts turns that into a normal { ok: false } response). Lets the
+// handlers run several queries with Promise.all without checking each one.
+function ok(res: QueryResult) {
+  if (res.error) throw new Error(res.error.message);
+  return res.data;
+}
 
 function computeWeekNumber(activityDateStr: string, seasonStartDateStr: string): number {
   const start = new Date(seasonStartDateStr);
@@ -25,33 +36,60 @@ function computeWeekNumber(activityDateStr: string, seasonStartDateStr: string):
   return days < 0 ? 1 : Math.floor(days / 7) + 1;
 }
 
-function capPeriodKey(activityDateStr: string, weekNumber: number, capWindow: string | null): string {
-  if (capWindow === "month") return String(activityDateStr).slice(0, 7); // 'YYYY-MM'
-  return String(weekNumber);
+// Same ordering everywhere ranks are shown, so a profile's "Rank #4" always
+// matches where that person actually sits on the leaderboard — including
+// ties, which are broken by name rather than left to whatever order the
+// database happened to return rows in.
+function rankUsers(users: Row[], pointsByUser: Record<string, number>): Row[] {
+  return users
+    .map((u): Row => ({ ...u, points: pointsByUser[u.user_id] || 0 }))
+    .sort((a, b) => b.points - a.points || String(a.name).localeCompare(String(b.name)));
 }
 
 // ---- Auth ----
 
+const LOGIN_MAX_FAILS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
 export async function handleLogin(db: SupabaseClient, params: Params) {
-  const username = String(params.username || "").trim().toLowerCase();
+  const username = String(params.username || "").trim().toLowerCase().slice(0, 64);
   const pin = String(params.pin || "").trim();
   if (!username || !pin) return { ok: false, error: "Username and PIN are required." };
 
-  const { data: candidates, error } = await db
-    .from("users")
-    .select("*")
-    .ilike("username", username)
-    .eq("active", true);
-  if (error) return { ok: false, error: "Something went wrong: " + error.message };
+  // A 4-digit PIN is only 10,000 guesses, and the endpoint is reachable by
+  // anyone holding the (public) anon key — so after too many wrong PINs for
+  // a username, stop checking it for a while.
+  const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
+  // ilike is a pattern match, so % _ and * in what the caller typed would
+  // act as wildcards ("%" would match every user) — escape them, and check
+  // for an exact match again below as a second guard.
+  const pattern = username.replace(/[\\%_*]/g, "\\$&");
 
-  const user = (candidates || []).find((u: Row) => String(u.pin).trim() === pin);
-  if (!user) return { ok: false, error: "Username or PIN not recognized." };
-
-  let teamName = "";
-  if (user.team_id) {
-    const { data: team } = await db.from("teams").select("team_name").eq("team_id", user.team_id).maybeSingle();
-    teamName = team?.team_name || "";
+  const [attempts, candidates] = await Promise.all([
+    db.from("login_attempts").select("id", { count: "exact", head: true }).eq("username", username).gte("attempted_at", since),
+    db.from("users")
+      .select("user_id, name, username, pin, job_function, role, team_id, teams(team_name)")
+      .ilike("username", pattern)
+      .eq("active", true),
+  ]);
+  if ((attempts.count ?? 0) >= LOGIN_MAX_FAILS) {
+    return { ok: false, error: "Too many failed attempts. Please wait a few minutes and try again." };
   }
+  const users: Row[] = ok(candidates) || [];
+
+  const user = users.find((u) => String(u.username).trim().toLowerCase() === username && String(u.pin).trim() === pin);
+  if (!user) {
+    await db.from("login_attempts").insert({ username });
+    // Housekeeping: nothing older than a day is ever consulted, so prune it
+    // now and then rather than on every failure.
+    if (Math.random() < 0.05) {
+      await db.from("login_attempts").delete().lt("attempted_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
+    }
+    return { ok: false, error: "Username or PIN not recognized." };
+  }
+
+  // Only worth a write if there's something to clear — nearly every login.
+  if ((attempts.count ?? 0) > 0) await db.from("login_attempts").delete().eq("username", username);
 
   return {
     ok: true,
@@ -62,7 +100,7 @@ export async function handleLogin(db: SupabaseClient, params: Params) {
       job_function: user.job_function,
       role: user.role,
       team_id: user.team_id,
-      team_name: teamName,
+      team_name: user.teams?.team_name || "",
     },
   };
 }
@@ -76,40 +114,76 @@ async function requireAdmin(db: SupabaseClient, params: Params): Promise<string>
 
 // ---- Activities ----
 
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+// First day of the month containing dateStr, and of the month after it.
+function monthBounds(dateStr: string): [string, string] {
+  const [y, m] = dateStr.slice(0, 7).split("-").map(Number);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return [`${y}-${pad(m)}-01`, m === 12 ? `${y + 1}-01-01` : `${y}-${pad(m + 1)}-01`];
+}
+
 export async function handleSubmitActivity(db: SupabaseClient, params: Params) {
   const userId = await requireAuth(params);
   const activityId = params.activity_id;
-  const activityDate = params.activity_date || new Date().toISOString().slice(0, 10);
   const note = String(params.note_or_link || "").trim();
 
-  const { data: config } = await db
-    .from("activities_config")
-    .select("*")
-    .eq("activity_id", activityId)
-    .eq("active", true)
-    .maybeSingle();
+  const [configRes, seasonRes] = await Promise.all([
+    db.from("activities_config").select("*").eq("activity_id", activityId).eq("active", true).maybeSingle(),
+    db.from("season_config").select("key, value"),
+  ]);
+  const config = ok(configRes);
   if (!config) return { ok: false, error: "Unknown or inactive activity." };
-
-  const { data: seasonRows } = await db.from("season_config").select("*");
   const season: Record<string, string> = {};
-  (seasonRows || []).forEach((r: Row) => { season[r.key] = r.value; });
+  (ok(seasonRes) || []).forEach((r: Row) => { season[r.key] = r.value; });
 
+  // "Today" has to be the group's today, not UTC's — after 5pm Pacific it's
+  // already tomorrow in UTC, which would push an evening log into the
+  // next day (and, on a Sunday night, into the next week's cap).
+  const activityDate = params.activity_date ||
+    new Date().toLocaleDateString("en-CA", { timeZone: season.timezone || "America/Los_Angeles" });
+  if (!DATE_REGEX.test(activityDate) || Number.isNaN(Date.parse(activityDate))) {
+    return { ok: false, error: "That doesn't look like a valid date." };
+  }
   const weekNumber = computeWeekNumber(activityDate, season.season_start_date);
-  const periodKey = capPeriodKey(activityDate, weekNumber, config.cap_window);
+
+  // Count entries in this cap period in the database rather than pulling
+  // every prior row back to count them here.
+  let capCount: Promise<QueryResult> | null = null;
+  if (config.weekly_cap_units !== null && config.weekly_cap_units !== undefined) {
+    let q = db.from("activity_log").select("log_id", { count: "exact", head: true })
+      .eq("user_id", userId).eq("activity_id", activityId);
+    if (config.cap_window === "month") {
+      const [start, next] = monthBounds(activityDate);
+      q = q.gte("activity_date", start).lt("activity_date", next);
+    } else {
+      q = q.eq("week_number", weekNumber);
+    }
+    capCount = q as unknown as Promise<QueryResult>;
+  }
+
+  // The same entry arriving twice within seconds is a double-tap or a
+  // retry, not two real activities — hand back the first instead of
+  // logging it again.
+  const dupe = db.from("activity_log").select("log_id, points_awarded, capped")
+    .eq("user_id", userId).eq("activity_id", activityId).eq("activity_date", activityDate)
+    .eq("note_or_link", note).gte("created_at", new Date(Date.now() - 5000).toISOString()).limit(1);
+
+  const [capRes, dupeRes] = await Promise.all([capCount ?? Promise.resolve(null), dupe]);
+  const existing = ok(dupeRes)?.[0];
+  if (existing) {
+    return {
+      ok: true, log_id: existing.log_id, points_awarded: existing.points_awarded,
+      capped: existing.capped, activity_name: config.activity_name, duplicate: true,
+    };
+  }
 
   let capped = false;
   let pointsAwarded = Number(config.base_points);
-
-  if (config.weekly_cap_units !== null && config.weekly_cap_units !== undefined) {
-    const { data: priorRows } = await db
-      .from("activity_log")
-      .select("activity_date, week_number")
-      .eq("user_id", userId)
-      .eq("activity_id", activityId);
-    const priorCount = (priorRows || []).filter(
-      (l: Row) => capPeriodKey(l.activity_date, l.week_number, config.cap_window) === periodKey,
-    ).length;
-    if (priorCount >= Number(config.weekly_cap_units)) {
+  if (capRes) {
+    if (capRes.error) throw new Error(capRes.error.message);
+    // deno-lint-ignore no-explicit-any
+    if (((capRes as any).count ?? 0) >= Number(config.weekly_cap_units)) {
       capped = true;
       pointsAwarded = 0;
     }
@@ -126,7 +200,7 @@ export async function handleSubmitActivity(db: SupabaseClient, params: Params) {
       week_number: weekNumber,
       capped,
     })
-    .select()
+    .select("log_id")
     .single();
   if (error) return { ok: false, error: "Something went wrong: " + error.message };
 
@@ -144,99 +218,113 @@ export async function handleActivitiesList(db: SupabaseClient) {
 // ---- Leaderboard / profile / trends ----
 
 export async function handleLeaderboard(db: SupabaseClient, params: Params) {
+  await requireReadAuth(params);
   const scope = params.scope === "team" ? "team" : "individual";
-  const { data: log } = await db.from("activity_log").select("user_id, points_awarded");
-  const { data: users } = await db.from("users").select("*").eq("active", true);
-  const { data: teams } = await db.from("teams").select("*");
 
+  // Points come pre-summed from a view (one row per user) — summing the raw
+  // activity_log here would silently stop working past 1,000 rows.
+  const [pointsRes, usersRes, teamsRes] = await Promise.all([
+    db.from("user_points").select("user_id, points"),
+    db.from("users").select("user_id, name, job_function, team_id").eq("active", true),
+    db.from("teams").select("team_id, team_name, job_function"),
+  ]);
   const pointsByUser: Record<string, number> = {};
-  (log || []).forEach((l: Row) => {
-    pointsByUser[l.user_id] = (pointsByUser[l.user_id] || 0) + Number(l.points_awarded || 0);
-  });
+  (ok(pointsRes) || []).forEach((p: Row) => { pointsByUser[p.user_id] = p.points; });
+  const users: Row[] = ok(usersRes) || [];
+  const teams: Row[] = ok(teamsRes) || [];
 
   if (scope === "individual") {
-    const rows = (users || [])
-      .map((u: Row) => {
-        const team = (teams || []).find((t: Row) => t.team_id === u.team_id);
-        return {
-          user_id: u.user_id,
-          name: u.name,
-          team_name: team?.team_name || "",
-          job_function: u.job_function,
-          points: pointsByUser[u.user_id] || 0,
-        };
-      })
-      .sort((a: Row, b: Row) => b.points - a.points);
+    const teamNameById: Record<string, string> = {};
+    teams.forEach((t) => { teamNameById[t.team_id] = t.team_name; });
+    const rows = rankUsers(users, pointsByUser).map((u) => ({
+      user_id: u.user_id,
+      name: u.name,
+      team_name: teamNameById[u.team_id] || "",
+      job_function: u.job_function,
+      points: u.points,
+    }));
     return { ok: true, scope, rows };
   }
 
   const pointsByTeam: Record<string, number> = {};
-  (users || []).forEach((u: Row) => {
+  users.forEach((u) => {
     pointsByTeam[u.team_id] = (pointsByTeam[u.team_id] || 0) + (pointsByUser[u.user_id] || 0);
   });
-  const teamRows = (teams || [])
-    .map((t: Row) => ({ team_id: t.team_id, team_name: t.team_name, job_function: t.job_function, points: pointsByTeam[t.team_id] || 0 }))
-    .sort((a: Row, b: Row) => b.points - a.points);
+  // A team with nobody active on it isn't ranked — keeps retired or demo-only
+  // teams off the board.
+  const activeTeamIds = new Set(users.map((u) => u.team_id));
+  const teamRows = teams
+    .filter((t) => activeTeamIds.has(t.team_id))
+    .map((t) => ({ team_id: t.team_id, team_name: t.team_name, job_function: t.job_function, points: pointsByTeam[t.team_id] || 0 }))
+    .sort((a, b) => b.points - a.points || String(a.team_name).localeCompare(String(b.team_name)));
   return { ok: true, scope, rows: teamRows };
 }
 
+// One call for everything the profile page shows. It used to take three
+// (profile, goals, goal candidates), each its own function invocation.
+//   limit             how many recent activity rows to return (default 50, max 500)
+//   include_goals     also return this person's goals
+//   include_candidates also return goal-setting candidates — only honored
+//                      for your own profile
 export async function handleProfile(db: SupabaseClient, params: Params) {
+  const callerId = await requireReadAuth(params);
   const userId = params.user_id;
-  const { data: user } = await db.from("users").select("*").eq("user_id", userId).maybeSingle();
+  const limit = Math.min(Math.max(Number(params.limit) || 50, 1), 500);
+
+  const [userRes, logRes, pointsRes, activeRes, goals, candidates] = await Promise.all([
+    db.from("users")
+      .select("user_id, name, job_function, role, email, phone, linkedin_url, interested_role, teams(team_name)")
+      .eq("user_id", userId).maybeSingle(),
+    db.from("activity_log")
+      .select("log_id, activity_date, created_at, points_awarded, capped, note_or_link, activities_config(activity_name)")
+      .eq("user_id", userId).order("created_at", { ascending: false }).limit(limit),
+    db.from("user_points").select("user_id, points, entries"),
+    db.from("users").select("user_id, name").eq("active", true),
+    params.include_goals ? loadGoals(db, userId) : Promise.resolve(null),
+    params.include_candidates && callerId === userId ? loadGoalCandidates(db, userId) : Promise.resolve(null),
+  ]);
+
+  const user = ok(userRes);
   if (!user) return { ok: false, error: "User not found." };
 
-  let teamName = "";
-  if (user.team_id) {
-    const { data: team } = await db.from("teams").select("team_name").eq("team_id", user.team_id).maybeSingle();
-    teamName = team?.team_name || "";
-  }
-
-  const { data: myLogRaw } = await db
-    .from("activity_log")
-    .select("*")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-  const { data: configRows } = await db.from("activities_config").select("*");
-  const configById: Record<string, Row> = {};
-  (configRows || []).forEach((c: Row) => { configById[c.activity_id] = c; });
-
-  const myLog = (myLogRaw || []).map((l: Row) => ({
-    log_id: l.log_id,
-    activity_name: configById[l.activity_id]?.activity_name || l.activity_id,
-    activity_date: l.activity_date,
-    timestamp: l.created_at,
-    points_awarded: l.points_awarded,
-    capped: l.capped,
-    note_or_link: l.note_or_link,
-  }));
-  const totalPoints = myLog.reduce((sum: number, l: Row) => sum + Number(l.points_awarded || 0), 0);
-
-  const { data: allLog } = await db.from("activity_log").select("user_id, points_awarded");
-  const { data: activeUsers } = await db.from("users").select("user_id").eq("active", true);
   const pointsByUser: Record<string, number> = {};
-  (allLog || []).forEach((l: Row) => { pointsByUser[l.user_id] = (pointsByUser[l.user_id] || 0) + Number(l.points_awarded || 0); });
-  const ranked = (activeUsers || [])
-    .map((u: Row) => ({ user_id: u.user_id, points: pointsByUser[u.user_id] || 0 }))
-    .sort((a: Row, b: Row) => b.points - a.points);
-  const rank = ranked.findIndex((r: Row) => r.user_id === userId) + 1;
+  let totalEntries = 0;
+  (ok(pointsRes) || []).forEach((p: Row) => {
+    pointsByUser[p.user_id] = p.points;
+    if (p.user_id === userId) totalEntries = p.entries;
+  });
+  const ranked = rankUsers(ok(activeRes) || [], pointsByUser);
+  const rank = ranked.findIndex((r) => r.user_id === userId) + 1;
 
-  return {
+  const result: Row = {
     ok: true,
     user: {
       user_id: user.user_id,
       name: user.name,
       job_function: user.job_function,
-      team_name: teamName,
+      team_name: user.teams?.team_name || "",
       role: user.role,
       email: user.email,
       phone: user.phone,
       linkedin_url: user.linkedin_url,
       interested_role: user.interested_role,
     },
-    total_points: totalPoints,
+    total_points: pointsByUser[userId] || 0,
+    total_entries: totalEntries,
     rank,
-    activity_log: myLog,
+    activity_log: (ok(logRes) || []).map((l: Row) => ({
+      log_id: l.log_id,
+      activity_name: l.activities_config?.activity_name || "",
+      activity_date: l.activity_date,
+      timestamp: l.created_at,
+      points_awarded: l.points_awarded,
+      capped: l.capped,
+      note_or_link: l.note_or_link,
+    })),
   };
+  if (goals) result.goals = goals;
+  if (candidates) result.goal_candidates = candidates;
+  return result;
 }
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -275,57 +363,50 @@ export async function handleUpdateProfile(db: SupabaseClient, params: Params) {
 // progress bar. current_count counts every log entry for that activity
 // regardless of capped/points, since a goal like "10 mock interviews" is
 // about how many you actually did, not how many earned points.
-export async function handleGetGoals(db: SupabaseClient, params: Params) {
-  const userId = params.user_id;
-  if (!userId) return { ok: false, error: "user_id is required." };
-
-  const { data: goalRows } = await db.from("user_goals").select("*").eq("user_id", userId);
-  if (!goalRows || goalRows.length === 0) return { ok: true, goals: [] };
-
-  const activityIds = goalRows.map((g: Row) => g.activity_id);
-  const { data: configRows } = await db
-    .from("activities_config")
-    .select("activity_id, activity_name")
-    .in("activity_id", activityIds);
-  const configById: Record<string, Row> = {};
-  (configRows || []).forEach((c: Row) => { configById[c.activity_id] = c; });
-
-  const { data: logRows } = await db
-    .from("activity_log")
-    .select("activity_id")
-    .eq("user_id", userId)
-    .in("activity_id", activityIds);
+async function loadGoals(db: SupabaseClient, userId: string) {
+  const [goalsRes, countsRes] = await Promise.all([
+    db.from("user_goals").select("activity_id, target_count, activities_config(activity_name)").eq("user_id", userId),
+    db.from("user_activity_counts").select("activity_id, n").eq("user_id", userId),
+  ]);
   const countByActivity: Record<string, number> = {};
-  (logRows || []).forEach((l: Row) => { countByActivity[l.activity_id] = (countByActivity[l.activity_id] || 0) + 1; });
+  (ok(countsRes) || []).forEach((c: Row) => { countByActivity[c.activity_id] = c.n; });
 
-  const goals = goalRows.map((g: Row) => ({
+  return (ok(goalsRes) || []).map((g: Row) => ({
     activity_id: g.activity_id,
-    activity_name: configById[g.activity_id]?.activity_name || g.activity_id,
+    activity_name: g.activities_config?.activity_name || g.activity_id,
     target_count: g.target_count,
     current_count: countByActivity[g.activity_id] || 0,
   }));
-
-  return { ok: true, goals };
 }
 
 // Candidate activities for the "add a goal" form — scoped to the caller's
 // own job_function. An activity with no job_functions set applies to
 // everyone. This only affects what shows up as a suggestion; it doesn't
 // restrict which activities someone can actually log.
-export async function handleGoalCandidates(db: SupabaseClient, params: Params) {
-  const userId = await requireAuth(params);
-  const { data: user } = await db.from("users").select("job_function").eq("user_id", userId).maybeSingle();
-  const jobFunction = user?.job_function || "";
+async function loadGoalCandidates(db: SupabaseClient, userId: string) {
+  const [userRes, configRes] = await Promise.all([
+    db.from("users").select("job_function").eq("user_id", userId).maybeSingle(),
+    db.from("activities_config").select("activity_id, activity_name, category, job_functions").eq("active", true),
+  ]);
+  const jobFunction = ok(userRes)?.job_function || "";
 
-  const { data: configRows } = await db.from("activities_config").select("*").eq("active", true);
-  const candidates = (configRows || [])
+  return (ok(configRes) || [])
     .filter((c: Row) => {
       const scopes = String(c.job_functions || "").split(",").map((s: string) => s.trim()).filter(Boolean);
       return scopes.length === 0 || scopes.includes(jobFunction);
     })
     .map((c: Row) => ({ activity_id: c.activity_id, activity_name: c.activity_name, category: c.category }));
+}
 
-  return { ok: true, activities: candidates };
+export async function handleGetGoals(db: SupabaseClient, params: Params) {
+  await requireReadAuth(params);
+  if (!params.user_id) return { ok: false, error: "user_id is required." };
+  return { ok: true, goals: await loadGoals(db, params.user_id) };
+}
+
+export async function handleGoalCandidates(db: SupabaseClient, params: Params) {
+  const userId = await requireAuth(params);
+  return { ok: true, activities: await loadGoalCandidates(db, userId) };
 }
 
 // Full replace, not incremental — matches a single "Save goals" form
@@ -336,7 +417,10 @@ export async function handleUpdateGoals(db: SupabaseClient, params: Params) {
   const goals = Array.isArray(params.goals) ? params.goals : [];
 
   const cleaned = goals
-    .map((g: Row) => ({ activity_id: String(g?.activity_id || ""), target_count: Number(g?.target_count) || 0 }))
+    .map((g: Row) => ({
+      activity_id: String(g?.activity_id || ""),
+      target_count: Math.min(999, Math.floor(Number(g?.target_count)) || 0),
+    }))
     .filter((g: Row) => g.activity_id && g.target_count > 0);
 
   const { error: deleteError } = await db.from("user_goals").delete().eq("user_id", userId);
@@ -351,30 +435,34 @@ export async function handleUpdateGoals(db: SupabaseClient, params: Params) {
   return { ok: true };
 }
 
-// Computed live rather than from a stored snapshot table — at this scale
-// (dozens of people, two months) re-aggregating on request is cheap and
-// keeps trends from ever going stale.
+// Computed live from a per-user-per-week view rather than a stored
+// snapshot table, so trends can never go stale.
 export async function handleTrends(db: SupabaseClient, params: Params) {
+  await requireReadAuth(params);
   const scope = params.scope === "team" ? "team" : "individual";
-  const { data: log } = await db.from("activity_log").select("user_id, points_awarded, week_number");
-  const { data: users } = await db.from("users").select("user_id, team_id, name");
-  const { data: teams } = await db.from("teams").select("team_id, team_name");
+
+  const [weekRows, usersRes, teamsRes] = await Promise.all([
+    fetchAll(db, "user_week_points", ["week_number", "user_id"]),
+    db.from("users").select("user_id, team_id, name"),
+    db.from("teams").select("team_id, team_name"),
+  ]);
+  const users: Row[] = ok(usersRes) || [];
+  const teams: Row[] = ok(teamsRes) || [];
 
   const userTeam: Record<string, string> = {};
-  (users || []).forEach((u: Row) => { userTeam[u.user_id] = u.team_id; });
+  users.forEach((u) => { userTeam[u.user_id] = u.team_id; });
 
   const byWeek: Record<number, Record<string, number>> = {};
-  (log || []).forEach((l: Row) => {
-    const week = l.week_number;
-    const entityId = scope === "team" ? userTeam[l.user_id] : l.user_id;
+  weekRows.forEach((r) => {
+    const entityId = scope === "team" ? userTeam[r.user_id] : r.user_id;
     if (!entityId) return;
-    byWeek[week] = byWeek[week] || {};
-    byWeek[week][entityId] = (byWeek[week][entityId] || 0) + Number(l.points_awarded || 0);
+    byWeek[r.week_number] = byWeek[r.week_number] || {};
+    byWeek[r.week_number][entityId] = (byWeek[r.week_number][entityId] || 0) + r.points;
   });
 
   const nameById: Record<string, string> = {};
-  if (scope === "team") (teams || []).forEach((t: Row) => { nameById[t.team_id] = t.team_name; });
-  else (users || []).forEach((u: Row) => { nameById[u.user_id] = u.name; });
+  if (scope === "team") teams.forEach((t) => { nameById[t.team_id] = t.team_name; });
+  else users.forEach((u) => { nameById[u.user_id] = u.name; });
 
   const weeks = Object.keys(byWeek).map(Number).sort((a, b) => a - b);
   const series = weeks.map((week) => ({
@@ -388,64 +476,52 @@ export async function handleTrends(db: SupabaseClient, params: Params) {
 // ---- Wall ----
 
 export async function handleWall(db: SupabaseClient, params: Params) {
-  const limit = params.limit ? Number(params.limit) : 50;
+  await requireReadAuth(params);
+  const limit = Math.min(Math.max(Number(params.limit) || 50, 1), 200);
 
-  const { data: config } = await db.from("activities_config").select("*");
-  const configById: Record<string, Row> = {};
-  (config || []).forEach((a: Row) => { configById[a.activity_id] = a; });
+  // The whole wall in ONE query: the filtering, plus the joins (activity
+  // name, author, author's team) and each entry's reactions and comments,
+  // all done in Postgres. This used to be several sequential round trips
+  // pulling whole tables back to stitch together here — and since every
+  // open Wall tab polls this, it's the request that matters most. (Embedded
+  // lists like reactions aren't subject to the 1,000-row cap, and they're
+  // bounded by the entries returned anyway.)
+  const log: Row[] = ok(
+    await db
+      .from("activity_log")
+      .select(
+        "log_id, created_at, user_id, points_awarded, note_or_link, " +
+          "activities_config!inner(activity_name, surface_on_wall), users(name, teams(team_name)), " +
+          "wall_reactions(emoji), wall_comments(comment_id, user_id, text, created_at, users(name))",
+      )
+      .eq("activities_config.surface_on_wall", true)
+      .gt("points_awarded", 0)
+      .order("created_at", { ascending: false })
+      .order("log_id")
+      .order("created_at", { referencedTable: "wall_comments", ascending: true })
+      .limit(limit),
+  ) || [];
 
-  const { data: users } = await db.from("users").select("*");
-  const usersById: Record<string, Row> = {};
-  (users || []).forEach((u: Row) => { usersById[u.user_id] = u; });
-
-  const { data: teams } = await db.from("teams").select("*");
-  const teamsById: Record<string, Row> = {};
-  (teams || []).forEach((t: Row) => { teamsById[t.team_id] = t; });
-
-  const { data: logRaw } = await db.from("activity_log").select("*").order("created_at", { ascending: false }).limit(500);
-  const log = (logRaw || [])
-    .filter((l: Row) => {
-      const cfg = configById[l.activity_id];
-      return cfg && cfg.surface_on_wall && Number(l.points_awarded) > 0;
-    })
-    .slice(0, limit);
-
-  const logIds = log.map((l: Row) => l.log_id);
-  const { data: reactions } = logIds.length
-    ? await db.from("wall_reactions").select("*").in("log_id", logIds)
-    : { data: [] as Row[] };
-  const { data: comments } = logIds.length
-    ? await db.from("wall_comments").select("*").in("log_id", logIds).order("created_at", { ascending: true })
-    : { data: [] as Row[] };
-
-  const entries = log.map((l: Row) => {
-    const cfg = configById[l.activity_id];
-    const user = usersById[l.user_id];
-    const team = user ? teamsById[user.team_id] : null;
-
-    const reactionCounts: Record<string, number> = {};
-    (reactions || []).filter((r: Row) => r.log_id === l.log_id).forEach((r: Row) => {
-      reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + 1;
-    });
-
-    const myComments = (comments || []).filter((c: Row) => c.log_id === l.log_id).map((c: Row) => ({
-      comment_id: c.comment_id,
-      user_id: c.user_id,
-      name: usersById[c.user_id]?.name || c.user_id,
-      text: c.text,
-    }));
+  const entries = log.map((l) => {
+    const reactions: Record<string, number> = {};
+    (l.wall_reactions || []).forEach((r: Row) => { reactions[r.emoji] = (reactions[r.emoji] || 0) + 1; });
 
     return {
       log_id: l.log_id,
       timestamp: l.created_at,
       user_id: l.user_id,
-      name: user?.name || "Unknown",
-      team_name: team?.team_name || "",
-      activity_name: cfg.activity_name,
+      name: l.users?.name || "Unknown",
+      team_name: l.users?.teams?.team_name || "",
+      activity_name: l.activities_config.activity_name,
       points_awarded: l.points_awarded,
       note_or_link: l.note_or_link,
-      reactions: reactionCounts,
-      comments: myComments,
+      reactions,
+      comments: (l.wall_comments || []).map((c: Row) => ({
+        comment_id: c.comment_id,
+        user_id: c.user_id,
+        name: c.users?.name || c.user_id,
+        text: c.text,
+      })),
     };
   });
 
@@ -554,8 +630,12 @@ export async function handleImport(db: SupabaseClient, params: Params) {
     if (!rows.length) continue;
 
     const cleaned = rows.map((r) => normalizeRowForTable(table, r));
-    const { error } = await db.from(table).upsert(cleaned, { onConflict: primaryKeyFor(table) });
-    if (error) return { ok: false, error: `Failed importing ${table}: ${error.message}`, imported: summary };
+    // In batches: a full season's activity log is thousands of rows, and
+    // one giant request body is the first thing to fall over.
+    for (let i = 0; i < cleaned.length; i += 500) {
+      const { error } = await db.from(table).upsert(cleaned.slice(i, i + 500), { onConflict: primaryKeyFor(table) });
+      if (error) return { ok: false, error: `Failed importing ${table}: ${error.message}`, imported: summary };
+    }
     summary[table] = cleaned.length;
   }
 

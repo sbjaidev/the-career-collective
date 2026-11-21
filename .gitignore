@@ -12,3 +12,10 @@ supabase/.temp/
 /docs/qa-testing-spec.pdf
 /docs/what-is-bkb-cpl.md
 /docs/what-is-bkb-cpl.pdf
+
+# Generated demo data (contains login PINs) — regenerate with scripts/generate_demo_seed.py
+/supabase/demo_seed.sql
+/supabase/demo_unseed.sql
+/supabase/demo_logins.txt
+/docs/presentation-kit/
+/docs/presentation-kit.zip
